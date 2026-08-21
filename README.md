@@ -19,6 +19,7 @@ icloud-md push
 - [Why](#why)
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Using Obsidian?](#using-obsidian)
 - [Commands](#commands)
 - [What works today](#what-works-today)
 - [Where the title lives](#where-the-title-lives)
@@ -130,16 +131,8 @@ in the same (sub)folder it's in inside Notes.app, with each sharer's notes
 under a top-level directory named for them — and downloading any
 attachments alongside their note.
 
-If you keep your notes in Obsidian (or any editor where the file name *is*
-the document title), clone with `--filename-as-title` instead:
-
-```bash
-icloud-md clone ./my-notes --filename-as-title
-```
-
-Each file is then named for its note's title and contains only the body,
-rather than repeating the title as the first line. See
-[Where the title lives](#where-the-title-lives) for what that changes.
+If you keep your notes in Obsidian, read [Using Obsidian?](#using-obsidian)
+before you clone — the vault shape is chosen once, at `clone` time.
 
 After that:
 
@@ -171,6 +164,46 @@ trusted, returning browser. Credentials are never stored inside the vault
 folder itself (a vault is exactly the kind of thing that gets copied,
 zipped, or synced elsewhere); a cloned folder's own
 `.icloud-md/state.json` only records *which* account it's bound to.
+
+## Using Obsidian?
+
+A cloned vault is already just Markdown, so Obsidian can open it as-is. Two
+things make the fit exact — pick the first if you can:
+
+1. **Use the [Apple Notes Sync](https://community.obsidian.md/plugins/icloud-notes)
+   plugin** ([source](https://github.com/coddingtonbear/obsidian-apple-notes)).
+   It's a thin Obsidian front-end for this CLI: install `icloud-md` as above,
+   install the plugin from the community plugin browser, and connect a
+   folder. From there you pull and push from the ribbon, the command palette,
+   or the status bar — and optionally on a schedule — without touching a
+   terminal. Because it runs inside Obsidian, it can also perform the file
+   renames a remote retitle calls for *with link updating on*, so your
+   `[[wikilinks]]` follow the note instead of going stale (it uses
+   [`--defer-renames`](#--defer-renames) under the hood). The plugin runs
+   the initial clone for you when you click **Connect**; turn on its
+   *filename as title* setting first if you want the vault shape described
+   below, since that can't be changed afterwards. Desktop only.
+
+2. **Not up for a plugin? Clone with `--filename-as-title`.**
+
+   ```bash
+   icloud-md clone ./my-vault --filename-as-title
+   ```
+
+   Each file is then *named* for its note's title and holds only the body —
+   the shape Obsidian expects — instead of repeating the title as the first
+   line. Renaming a file retitles the note. Then run `icloud-md pull` /
+   `icloud-md push` yourself whenever you want to sync; the one thing you
+   lose versus the plugin is automatic wikilink updates when a note is
+   retitled on another device (a plain `pull` renames the file behind
+   Obsidian's back). See [Where the title lives](#where-the-title-lives)
+   for the full trade-offs.
+
+Either way, Obsidian's own notation survives the round trip: wikilinks and
+embeds, callouts, `#tags`, `==highlights==`, and footnotes keep their
+spelling on disk instead of collecting the backslashes plain Markdown would
+want. YAML frontmatter is treated as local metadata — add aliases and tags
+freely; they stay on your machine and never look like a note change.
 
 ## Commands
 
