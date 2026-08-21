@@ -167,15 +167,14 @@ zipped, or synced elsewhere); a cloned folder's own
 
 ## Using Obsidian?
 
-A cloned vault is already just Markdown, so Obsidian can open it as-is. Two
-things make the fit exact — pick the first if you can:
+Good news: I use this tool with Obsidian, too! There are two things you can do to make your experience of using this tool with Obsidian a little more polished:
 
 1. **Use the [Apple Notes Sync](https://community.obsidian.md/plugins/icloud-notes)
    plugin** ([source](https://github.com/coddingtonbear/obsidian-apple-notes)).
    It's a thin Obsidian front-end for this CLI: install `icloud-md` as above,
    install the plugin from the community plugin browser, and connect a
    folder. From there you pull and push from the ribbon, the command palette,
-   or the status bar — and optionally on a schedule — without touching a
+   or the status bar (and optionally on a schedule) without touching a
    terminal. Because it runs inside Obsidian, it can also perform the file
    renames a remote retitle calls for *with link updating on*, so your
    `[[wikilinks]]` follow the note instead of going stale (it uses
@@ -183,7 +182,6 @@ things make the fit exact — pick the first if you can:
    the initial clone for you when you click **Connect**; turn on its
    *filename as title* setting first if you want the vault shape described
    below, since that can't be changed afterwards. Desktop only.
-
 2. **Not up for a plugin? Clone with `--filename-as-title`.**
 
    ```bash
