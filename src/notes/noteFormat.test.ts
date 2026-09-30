@@ -174,3 +174,22 @@ test("projection equality: numbered start matters only at a group's first item",
   const c = [paragraph("one", { kind: "numberedList", startNumber: 4 }), paragraph("two", { kind: "numberedList", startNumber: 0 })];
   assert.equal(formatsRoundTripEqual(a, c), false);
 });
+
+test("CR and CRLF boundaries preserve original offsets and trailing-newline styles", () => {
+  const text = "😀A\r\nB\r\rC\n";
+  const result = decodeNoteFormat(text, runs(
+    { length: 4, fontHints: 1, paragraphStyle: { style: 0 } },
+    { length: 1, paragraphStyle: { style: 1 } },
+    { length: 2, fontHints: 2, paragraphStyle: { style: 2 } },
+    { length: 1, paragraphStyle: { style: 3 } },
+    { length: 2, paragraphStyle: { style: 3 } },
+  ));
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(result.paragraphs.map(p => p.text), ["😀A", "B", "", "C", ""]);
+  assert.deepEqual(result.paragraphs.map(p => p.start), [0, 5, 7, 8, 10]);
+  assert.deepEqual(result.paragraphs.map(p => p.kind), ["heading", "subheading", "body", "body", "body"]);
+  assert.deepEqual(result.paragraphs[0]?.spans, [{ ...PLAIN_STYLE, bold: true, length: 3 }]);
+  assert.deepEqual(result.paragraphs[1]?.spans, [{ ...PLAIN_STYLE, italic: true, length: 1 }]);
+  for (const p of result.paragraphs) assert.equal(text.slice(p.start, p.start + p.text.length), p.text);
+});

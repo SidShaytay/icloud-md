@@ -172,16 +172,21 @@ export function decodeNoteFormat(text: string, attributeRuns: readonly Attribute
     intervals.find((interval) => charIndex >= interval.start && charIndex < interval.end);
 
   const paragraphs: FormatParagraph[] = [];
-  const lines = text.split("\n");
+  // Apple renders CR and CRLF as paragraph boundaries too. Keep offsets
+  // in the original wire text: a CRLF consumes two UTF-16 code units.
+  const separators = [...text.matchAll(/\r\n?|\n/g)];
+  const lines = text.split(/\r\n?|\n/);
   let offset = 0;
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const line = lines[lineIndex]!;
     const lineStart = offset;
     const lineEnd = lineStart + line.length;
     const hasNewline = lineIndex < lines.length - 1;
-    offset = lineEnd + (hasNewline ? 1 : 0);
+    const separatorLength = separators[lineIndex]?.[0].length ?? 0;
+    offset = lineEnd + separatorLength;
 
-    const anchorIndex = hasNewline ? lineEnd : lineEnd - 1;
+    // For CRLF, the LF is the trailing newline that anchors the style.
+    const anchorIndex = hasNewline ? offset - 1 : lineEnd - 1;
     const anchorRun = anchorIndex >= lineStart ? runAt(anchorIndex)?.run : undefined;
     const ps = anchorRun?.paragraphStyle;
     const kind = paragraphKindOf(ps) ?? "body";

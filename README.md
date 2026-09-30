@@ -253,7 +253,9 @@ resolution live.
   bold/italic/strikethrough/underline/links render to real Markdown on
   `pull`/`clone` and push back as the matching Apple formatting on edit.
   Anything this tool doesn't fully understand about a note's formatting
-  stays read-only rather than risking a bad write.
+  stays read-only rather than risking a bad write. CR, CRLF and LF are
+  treated as line breaks; Markdown uses LF, and pushing an edited note
+  rewrites its line separators as LF while preserving paragraph boundaries.
 - **Writing to notes shared with you is supported for creates and edits**
   inside a shared folder you have write access to — not just the read
   side. See Known limitations for what's still refused.
