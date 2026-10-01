@@ -121,12 +121,12 @@ function paragraphKindOf(ps: ParagraphStyle | undefined): ParagraphKind | undefi
  * Splits a note's text into per-line paragraphs and derives each one's
  * paragraph attributes and inline spans from the attribute runs covering it.
  *
- * Paragraph attributes come from the run covering the line's trailing
- * newline (a paragraph's style flows through its newline - confirmed on the
- * wire), falling back to the line's last character for the final,
- * unterminated line. Runs may span multiple lines (Apple merges adjacent
- * equal runs freely) or disagree within one (never observed; the newline's
- * run wins, matching where Apple's own editor anchors paragraph state).
+ * Paragraph attributes come from the run covering the paragraph start.
+ * Apple's web client selects paragraph style from `frameModel.start.nextAttributes`;
+ * its list numbering, list indentation, and checklist rendering hooks also
+ * read the attributes at the paragraph frame start. Runs may span multiple
+ * paragraphs (Apple merges adjacent equal runs freely) or disagree within a
+ * paragraph; in that case the start run wins.
  *
  * The run table may under-cover the text (tolerated: uncovered text is
  * plain Body, same policy as `decodeNoteEmbedSlots`) but must not overshoot
@@ -181,14 +181,15 @@ export function decodeNoteFormat(text: string, attributeRuns: readonly Attribute
     const line = lines[lineIndex]!;
     const lineStart = offset;
     const lineEnd = lineStart + line.length;
-    const hasNewline = lineIndex < lines.length - 1;
     const separatorLength = separators[lineIndex]?.[0].length ?? 0;
     offset = lineEnd + separatorLength;
 
-    // For CRLF, the LF is the trailing newline that anchors the style.
-    const anchorIndex = hasNewline ? offset - 1 : lineEnd - 1;
-    const anchorRun = anchorIndex >= lineStart ? runAt(anchorIndex)?.run : undefined;
-    const ps = anchorRun?.paragraphStyle;
+    // Apple starts paragraph-frame attribute lookup at the first UTF-16 unit
+    // of the paragraph. For an empty paragraph this is its separator; a
+    // final empty paragraph starts at text.length and therefore uses the
+    // default style, matching Apple's `nextAttributes || defaultAttributes`.
+    const startRun = lineStart < text.length ? runAt(lineStart)?.run : undefined;
+    const ps = startRun?.paragraphStyle;
     const kind = paragraphKindOf(ps) ?? "body";
 
     const spans: InlineSpan[] = [];

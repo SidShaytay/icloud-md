@@ -256,6 +256,10 @@ resolution live.
   stays read-only rather than risking a bad write. CR, CRLF and LF are
   treated as line breaks; Markdown uses LF, and pushing an edited note
   rewrites its line separators as LF while preserving paragraph boundaries.
+  This applies inside note text; CRLF frontmatter remains unsupported.
+  A fresh clone gets this representation immediately. An existing clone is
+  refreshed when iCloud reports a change to that note; a pull with no remote
+  note change leaves its tracked file alone.
 - **Writing to notes shared with you is supported for creates and edits**
   inside a shared folder you have write access to — not just the read
   side. See Known limitations for what's still refused.
