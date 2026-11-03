@@ -26,6 +26,9 @@
 import { chromium, type BrowserContext, type Frame, type Page } from "playwright";
 import path from "node:path";
 import { CONFIG_DIR } from "../src/configDir.js";
+import { accountSessionPath } from "../src/auth/accountStore.js";
+import { loadSession } from "../src/session.js";
+import { oracleSessionCookies } from "./oracleCookies.js";
 
 /**
  * Apple's wire enum for paragraph style, decoded here *independently* of
@@ -143,13 +146,20 @@ export class NotesWebOracle {
 
   static async open(options: OpenOracleOptions): Promise<NotesWebOracle> {
     const timeoutMs = options.timeoutMs ?? 45_000;
+    const session = await loadSession(accountSessionPath(options.dsid));
     const context = await chromium.launchPersistentContext(profileDirForDsid(options.dsid), {
       headless: options.headless ?? true,
       viewport: { width: 1440, height: 900 },
       permissions: ["clipboard-read", "clipboard-write"],
     });
-    const page = context.pages()[0] ?? (await context.newPage());
-    return new NotesWebOracle(context, page, timeoutMs);
+    try {
+      await context.addCookies(oracleSessionCookies(session.cookie, await context.cookies()));
+      const page = context.pages()[0] ?? (await context.newPage());
+      return new NotesWebOracle(context, page, timeoutMs);
+    } catch (error) {
+      await context.close();
+      throw error;
+    }
   }
 
   /** The notes3 SPA frame; everything lives inside it. */
@@ -405,7 +415,7 @@ export class NotesWebOracle {
 
     const seen = new Set<string>();
     return rows.filter((row) => {
-      const key = `${row.title} ${row.snippet} ${row.folder}`;
+      const key = `${row.title}\u0000${row.snippet}\u0000${row.folder}`;
       if (seen.has(key) || row.title === "") {
         return false;
       }
