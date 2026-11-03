@@ -124,6 +124,23 @@ To run only this block:
 npm run build && ICLOUD_MD_ITEST=1 npx tsx --test --test-name-pattern="carriage-return" integration/live.test.ts
 ```
 
+## Independent attachment titles
+
+The focused attachment-title test plants a captured Apple table, keeps its
+entire document behind an object-only first line, and sets an independent
+display title. It verifies pull filenames, local renames, and title-only
+`apple-note-title` requests while asserting that the compressed note and
+table payloads remain byte-identical. Apple's web client must still render
+the table and show the updated title in its note list. This tests metadata
+retitles, not image upload, scan editing, or drawing editing.
+
+It runs with the full suite, or alone:
+
+```bash
+npm run build
+ICLOUD_MD_ITEST=1 npx tsx --test integration/attachmentTitles.live.ts
+```
+
 ## Containment
 
 Fixtures are confined to a dedicated Notes folder, and two independent keys

@@ -273,6 +273,44 @@ test("a title paragraph holding an embed placeholder is never stripped", () => {
   assert.ok(result.markdownText.includes("￼"));
 });
 
+test("an embed-first note uses its independent display title without stripping the attachment", () => {
+  const record = makeRecord({
+    TextDataEncrypted: encodeTextField("\uFFFC\nBody text", [
+      { length: 1, attachmentInfo: { attachmentIdentifier: "SYNTHETIC-SCAN", typeUTI: "com.apple.paper" } },
+      { length: 10, paragraphStyle: { style: 3 } },
+    ]),
+    TitleEncrypted: { value: Buffer.from("Scanned measurements").toString("base64"), type: "ENCRYPTED_BYTES" },
+  });
+  const result = classifyNoteRecord(record, { titleMode: "filename" });
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.equal(result.titleLine, "Scanned measurements");
+  assert.equal(result.titleStripped, false);
+  assert.equal(result.bodyText, "\uFFFC\nBody text");
+  assert.equal(result.attachments[0]?.attachmentIdentifier, "SYNTHETIC-SCAN");
+});
+
+test("a first line containing both text and an embed is not treated as an independent metadata title", () => {
+  const record = makeRecord({
+    TextDataEncrypted: encodeTextField("Real text \uFFFC"),
+    TitleEncrypted: { value: Buffer.from("Cosmetic title").toString("base64"), type: "ENCRYPTED_BYTES" },
+  });
+  const result = classifyNoteRecord(record, { titleMode: "filename" });
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.equal(result.titleLine, "Real text \uFFFC");
+  assert.equal(result.titleInMetadata, undefined);
+});
+
+test("an untitled embed-first note does not use the object placeholder as a filename", () => {
+  const record = makeRecord({ TextDataEncrypted: encodeTextField("\uFFFC") });
+  const result = classifyNoteRecord(record, { titleMode: "filename" });
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.equal(result.titleLine, "Untitled");
+  assert.equal(result.bodyText, "\uFFFC");
+});
+
 test("a single-line note strips to an empty body", () => {
   const record = makeRecord({
     TextDataEncrypted: encodeTextField("Just a title", [{ length: 12, paragraphStyle: { style: 0 } }]),

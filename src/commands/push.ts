@@ -35,7 +35,7 @@ import { resolveNoteIds } from "../notes/noteIdPairing.js";
 import { listUntrackedMarkdownFiles } from "../notes/untrackedFiles.js";
 import { classifyNoteRecord, storesTextAsAsset, TEXT_AS_ASSET_REASON, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
-import { buildNoteCreateFields, buildNoteMoveFields, buildNoteTrashFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
+import { buildNoteCreateFields, buildNoteMoveFields, buildNoteTrashFields, buildNoteTitleMetadataFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
 import { noteDirOf, stateDirIndex, type StateDirInfo } from "../notes/folderLayout.js";
 import { planEmbedRepresentations } from "../notes/embedPushEdit.js";
 import { isEnoent } from "../fsUtil.js";
@@ -935,7 +935,7 @@ export async function buildPushPlan(
     // Built during planning, like every other write, so `status` shows a
     // retitle that can't be applied as a refusal instead of discovering it
     // mid-push. Undefined when the pair is a plain relocation.
-    let retitle: { payloadBase64: string; plainText: string } | undefined;
+    let retitle: { payloadBase64: string; plainText: string; metadataTitle?: string } | undefined;
     if (pair.newTitle !== undefined) {
       const prepared = prepareRetitle(record, pair, replicaIdBytes, titleMode);
       if (!prepared.ok) {
@@ -988,7 +988,9 @@ export async function buildPushPlan(
           // Freshly against whatever the record now is: a preceding
           // relocation both advanced the change tag and is what the echoed
           // Folder reference has to come from.
-          const fields = buildNoteUpdateFields(current, retitle.payloadBase64, retitle.plainText, Date.now());
+          const fields = retitle.metadataTitle !== undefined
+            ? buildNoteTitleMetadataFields(current, retitle.metadataTitle, Date.now())
+            : buildNoteUpdateFields(current, retitle.payloadBase64, retitle.plainText, Date.now());
           const retitled = await modify(fields, current.recordChangeTag ?? "");
           if ("failure" in retitled) {
             return { succeeded: false, message: `${pair.toFile}: server rejected the retitle: ${retitled.failure}` };
@@ -1277,8 +1279,12 @@ export async function buildPushPlan(
     // it actually is. What's remembered is the key as the file has it, so a
     // removed key that asked for the title the note already has is settled
     // as removed.
+    let metadataTitle: string | undefined;
     if (candidate.titleOnly) {
       const classified = classifyNoteRecord(record, { titleMode });
+      if (classified.status === "ok" && classified.titleInMetadata && !storesTextAsAsset(record)) {
+        metadataTitle = requestedRetitle(classified, requestedTitle);
+      }
       if (classified.status === "ok" && requestedRetitle(classified, requestedTitle) === undefined) {
         state.notes[recordName] = { ...entry, frontmatterTitle: statedTitle };
         planningMutatedState = true;
@@ -1303,22 +1309,28 @@ export async function buildPushPlan(
         .filter(([, attachment]) => attachment.noteRecordName === recordName)
         .map(([attachmentRecordName]) => attachmentRecordName),
     );
-    const prepared = await prepareUpdate(
-      session,
-      ckdatabasewsUrl,
-      dsid,
-      zone,
-      targetDir,
-      record,
-      entry,
-      localText,
-      trackedFileAttachmentIds,
-      replicaIdBytes,
-      modificationDateMs,
-      titleMode,
-      summary,
-      requestedTitle,
-    );
+    const prepared: PreparedCandidate | undefined = metadataTitle !== undefined
+      ? {
+          updates: [noteRecordUpdate(record, entry, buildNoteTitleMetadataFields(record, metadataTitle, modificationDateMs))],
+          noteTextUpdated: true,
+          retitledTo: metadataTitle,
+        }
+      : await prepareUpdate(
+          session,
+          ckdatabasewsUrl,
+          dsid,
+          zone,
+          targetDir,
+          record,
+          entry,
+          localText,
+          trackedFileAttachmentIds,
+          replicaIdBytes,
+          modificationDateMs,
+          titleMode,
+          summary,
+          requestedTitle,
+        );
     if (!prepared) {
       const newConflict = summary.conflicts[conflictsBefore];
       const newRefusal = summary.refused[refusedBefore];
@@ -1774,7 +1786,7 @@ export function prepareRetitle(
   replicaId: Uint8Array,
   titleMode: TitleMode,
 ):
-  | { ok: true; retitle: { payloadBase64: string; plainText: string } | undefined }
+  | { ok: true; retitle: { payloadBase64: string; plainText: string; metadataTitle?: string } | undefined }
   | { ok: false; resolution: "refused" | "conflict"; reason: string } {
   // Undo whatever asked for the retitle: a new name, a removed key, or both.
   const oldName = path.posix.basename(pair.entry.file);
@@ -1793,6 +1805,22 @@ export function prepareRetitle(
   if (classified.status !== "ok") {
     const detail = classified.status === "unsyncable" ? classified.reason : classified.status;
     return refused(`renaming this note would retitle it, but the note is no longer safely editable (${detail})`);
+  }
+  if (classified.titleInMetadata && !storesTextAsAsset(record)) {
+    // Keep the entire embedded document opaque. Apple stores the visible title
+    // separately for scan/drawing-first notes; replacing its first paragraph
+    // would replace an attachment rather than a title.
+    if (pair.newTitle === classified.title) return { ok: true, retitle: undefined };
+    const payload = record.fields.TextDataEncrypted?.value;
+    if (typeof payload !== "string") return refused("the note's inline body is missing");
+    return {
+      ok: true,
+      retitle: {
+        payloadBase64: payload,
+        plainText: classified.bodyText,
+        metadataTitle: pair.newTitle ?? "",
+      },
+    };
   }
   if (!classified.publishable) {
     return refused(
@@ -1988,10 +2016,10 @@ function retitleRemark(title: string): string {
  * title, and treating that as a retitle would rebuild the paragraph - and so
  * strip the real one's styling - on every push, forever.
  */
-function requestedRetitle(classified: OkNoteRecordResult, requestedTitle: string | undefined): string | undefined {
-  if (requestedTitle === undefined || classified.titleStripped !== true) {
-    return undefined;
-  }
+export function requestedRetitle(classified: OkNoteRecordResult, requestedTitle: string | undefined): string | undefined {
+  if (requestedTitle === undefined) return undefined;
+  if (classified.titleInMetadata) return requestedTitle === classified.title ? undefined : requestedTitle;
+  if (classified.titleStripped !== true) return undefined;
   return requestedTitle === classified.format?.[0]?.text ? undefined : requestedTitle;
 }
 
@@ -2051,13 +2079,13 @@ export function restoreStrippedTitle(
 ): { text: string; paragraphs: FormatParagraph[] } | undefined {
   if (classified.titleStripped !== true) {
     if (requestedTitle !== undefined) {
-      // The one note a filename-as-title vault leaves title-in-body: its
-      // title paragraph holds an embed placeholder. Refused rather than
-      // ignored - silently dropping a title the user asked for would look
-      // like the push succeeded at something it never attempted.
+      // Title-only metadata requests take a separate path. Do not silently
+      // ignore a title request when it arrived together with a body edit.
       summary.refused.push(
-        `${entry.file}: this note's title contains an embedded object, so "${NOTE_TITLE_KEY}" can't retitle it - ` +
-          "retitle it in Notes instead.",
+        classified.titleInMetadata
+          ? `${entry.file}: apply "${NOTE_TITLE_KEY}" without a body edit first; this note's title is stored independently`
+          : `${entry.file}: this note's title contains an embedded object, so "${NOTE_TITLE_KEY}" can't retitle it - ` +
+            "retitle it in Notes instead.",
       );
       return undefined;
     }

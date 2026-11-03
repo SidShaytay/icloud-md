@@ -47,7 +47,7 @@ export class RunContext {
    * Prepares a run: resolves config, clones a control vault, and refuses to
    * continue unless the test folder is present and holds nothing but fixtures.
    */
-  static async begin(): Promise<RunContext> {
+  static async begin(options: VaultOptions = {}): Promise<RunContext> {
     const config = await loadConfig();
     const runId = newRunId();
     const workDir = path.join(config.workRoot, runId);
@@ -63,7 +63,7 @@ export class RunContext {
 
     // The guard needs a clone to talk to the account through; that clone
     // becomes the run's primary working copy rather than being thrown away.
-    context.primaryVault = await context.vault("primary");
+    context.primaryVault = await context.vault("primary", options);
     const contents = await assertFolderSafe(context.primaryVault.dir, config.folder);
     context.baseline = new Set([...contents.notes, ...contents.subfolders].map((record) => record.recordName));
     console.error(`  folder "${config.folder}" is clean (${contents.notes.length} note(s), ${contents.subfolders.length} subfolder(s) from earlier runs)\n`);

@@ -349,9 +349,12 @@ resolution live.
 
 ## Where the title lives
 
-An Apple note has no title field of its own worth the name — its title *is*
-its first line. That leaves two honest ways to put a note in a file, and a
-vault picks one at `clone` time:
+For ordinary text notes, the title is the first line; Apple's separate
+list-view title can be truncated. Scan/drawing-first notes are different:
+their first paragraph can contain only an embedded object while Apple keeps
+a human-readable title in the separate display metadata. The CLI uses that
+independent title for their filenames without removing the embedded paragraph.
+A vault picks its text-title layout at `clone` time:
 
 | | Default (`in-body`) | `--filename-as-title` |
 | --- | --- | --- |
@@ -389,6 +392,15 @@ A few consequences worth knowing before you pick:
   `pull`**, since there is nowhere else for the new title to go. A retitle
   you asked for locally takes the same road, which is why renaming is always
   something `pull` does and never something `push` does.
+- **Scan/drawing-first notes keep their attachments and independent title.**
+  `pull` names them from Apple's display title, or `Untitled` if none is usable,
+  rather than from an object-replacement symbol. In filename-as-title mode,
+  renaming one or changing only `apple-note-title` updates the display title
+  and modification time without rewriting its document or attachments.
+  Ordinary attachment-body edits remain subject to the refusals below;
+  a title request combined with an unsupported body edit is still refused.
+  Existing clones pick up corrected filenames through the normal pull rename
+  path, including `--defer-renames`; no re-clone is needed.
 - **The mode is chosen once.** Switching an existing vault between the two
   shapes isn't supported yet: it would have to rewrite every file in the
   vault, which is a different (and more dangerous) operation than the
@@ -413,12 +425,12 @@ integration never gets to it.
 
 ## Known limitations
 
-- **Regular file attachments (images, audio, other files) are permanently
-  read-only** `push` will always refuse to write back
-  a note that has a non-table attachment, since this tool doesn't fully
-  parse that part of a note's internal format and editing one back risks
-  corrupting it. `restore <file>` discards any local edit to get back to a
-  clean copy. (Tables are the one exception — see above.)
+- **Body edits to regular file attachments (images, audio, other files)
+  remain read-only.** `push` refuses these content edits because it cannot
+  safely rebuild their internal format. A scan/drawing-first note's independent
+  title can still be changed without touching its content, as described above.
+  `restore <file>` discards a local body edit to get back to a clean copy.
+  Tables have a separate content-edit path — see above.
 - **Very large notes are read-only.** Past some size (seen on a note of
   ~830 KB compressed, most of it edit history) Apple moves a note's text
   out of the record and into a separate file. `clone` and `pull` download

@@ -1,6 +1,6 @@
 import type { CloudKitFieldValue, CloudKitRecord } from "../cloudkit/databaseClient.js";
 import type { TitleMode } from "./cloneState.js";
-import { TRASH_FOLDER_RECORD_NAME } from "./encodeNoteRecord.js";
+import { hasEmbedOnlyFirstLine, TRASH_FOLDER_RECORD_NAME } from "./encodeNoteRecord.js";
 import { decodeNoteEmbedSlots, OBJECT_REPLACEMENT_CHARACTER, type AttachmentReference, type EmbedSlot } from "./noteAttachments.js";
 import { decodeNoteFormat, formatsRoundTripEqual, trimTrailingWhitespace, type FormatParagraph } from "./noteFormat.js";
 import { decodeNoteString } from "./noteText.js";
@@ -12,10 +12,11 @@ import { UNKNOWN_CONTENT_BANNER } from "./unknownContent.js";
 export type OkNoteDecodeResult = {
   status: "ok";
   title: string;
-  /** The note's actual first line - what a filename-as-title vault names the
-   * file after. Distinct from `title`, which is Apple's truncated, cosmetic
-   * display metadata. */
+  /** The first text line, or the independent display title for a note whose
+   * first paragraph holds an embedded object. Used to name the local file. */
   titleLine: string;
+  /** An embed-first note's title lives in TitleEncrypted, not its body. */
+  titleInMetadata?: true;
   /** The note's plain visible text - what the CRDT document stores, and
    * what push's text splice operates on. */
   bodyText: string;
@@ -45,8 +46,9 @@ export type OkNoteDecodeResult = {
    * order - what attachment resolution and the table write path consume. */
   attachments: AttachmentReference[];
   /** False when this note contains content we can't safely push - see
-   * the Safety Guarantee Audit dev notes. `push` always re-derives this
-   * itself from a fresh record fetch; it's the authoritative gate.
+   * the Safety Guarantee Audit dev notes. `push` re-derives this from a fresh
+   * record for content edits. Independent-title metadata updates preserve
+   * every body/asset value and do not require a content round trip.
    * Since Step 1 of the formatting plan (2026-07-17), an embed we can't
    * *render* no longer clears this - such notes carry inline markers and
    * stay pushable under the marker-survival policy. A structure we can't
@@ -129,11 +131,13 @@ function classifyNoteBody(record: CloudKitRecord, options: ClassifyNoteOptions):
   }
 
   const title = decodeTitleField(record.fields.TitleEncrypted);
-  // The note's real first line, as distinct from `title`: TitleEncrypted is
-  // cosmetic display metadata that devices re-derive and that Apple truncates
-  // at ~76 characters, so it's the wrong thing to name a file after when the
-  // file name has to carry the title faithfully.
-  const titleLine = bodyText.split(/\r\n?|\n/)[0] ?? "";
+  // Ordinary text titles must keep the full first line, not Apple's truncated
+  // display metadata. Scan/drawing-first notes are different: Apple can name
+  // them in TitleEncrypted while their first paragraph remains an object.
+  const firstLine = bodyText.split(/\r\n?|\n/)[0] ?? "";
+  const titleInMetadata = hasEmbedOnlyFirstLine(bodyText);
+  const displayTitle = title.replaceAll(OBJECT_REPLACEMENT_CHARACTER, "");
+  const titleLine = titleInMetadata ? (displayTitle.trim() ? displayTitle : "Untitled") : firstLine;
   const embedSlots = decodeNoteEmbedSlots(compressed);
   if (embedSlots === undefined) {
     // The embed structure defies the model verified against real captures
@@ -156,7 +160,10 @@ function classifyNoteBody(record: CloudKitRecord, options: ClassifyNoteOptions):
   }
 
   const attachments = embedSlots.filter((slot): slot is EmbedSlot & { kind: "attachment" } => slot.kind === "attachment").map((slot) => slot.ref);
-  const base = { status: "ok" as const, title, titleLine, bodyText, embedSlots, attachments };
+  const base = {
+    status: "ok" as const, title, titleLine, bodyText, embedSlots, attachments,
+    ...(titleInMetadata ? { titleInMetadata: true as const } : {}),
+  };
 
   // Step 2's round-trip gate: the note renders to markdown only if parsing
   // that markdown back reproduces both the exact text and the formatting

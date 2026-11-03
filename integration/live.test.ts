@@ -9,6 +9,7 @@
  * and booting the browser are the expensive steps, so they happen once.
  */
 
+import "./attachmentTitles.live.js";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
