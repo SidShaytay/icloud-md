@@ -2058,8 +2058,10 @@ export function restoreStrippedTitle(
   requestedTitle?: string | undefined,
 ): { text: string; paragraphs: FormatParagraph[] } | undefined {
   if (classified.titleStripped !== true) {
-    if (requestedTitle !== undefined) {
-      // A title request must not be silently ignored, or passed off as a
+    if (requestedTitle !== undefined && !(classified.titleInMetadata && requestedTitle === classified.title)) {
+      // An unchanged independent title is the record of an unrepresentable
+      // filename, not a retitle. A real title request must not be silently
+      // ignored, or passed off as a
       // successful display-metadata write the native client may not adopt.
       summary.refused.push(
         classified.titleInMetadata

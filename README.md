@@ -399,8 +399,11 @@ A few consequences worth knowing before you pick:
   display metadata alone does not reliably retitle it in native Apple Notes.
   Rename it in Apple Notes, then pull. Existing attachment-body restrictions
   still apply; this filename fix does not make those edits writable.
-  Existing clones pick up corrected filenames through the normal pull rename
-  path, including `--defer-renames`; no re-clone is needed.
+  Existing filename-mode vaults reread unchanged records once after upgrading,
+  so the next `pull` corrects filenames too, including `--defer-renames`; no
+  re-clone is needed. Local body edits and explicit frontmatter title choices
+  survive; files you deleted or renamed by hand are left alone. Existing
+  in-body vaults keep their stable filenames.
 - **The mode is chosen once.** Switching an existing vault between the two
   shapes isn't supported yet: it would have to rewrite every file in the
   vault, which is a different (and more dangerous) operation than the

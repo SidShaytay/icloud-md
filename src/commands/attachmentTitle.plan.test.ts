@@ -30,12 +30,12 @@ after(async () => {
 });
 
 const replica = new Uint8Array(16).fill(7);
-const noteId = "DRAWING-NOTE";
+const noteId = "11111111-1111-4111-8111-111111111111";
 const attachmentId = "DRAWING-ATTACHMENT";
 const folderId = "TEST-FOLDER";
 const account = { appleId: "fixture@example.invalid", dsid: "fixture-account" };
 
-function drawingRecord(): CloudKitRecord {
+function drawingRecord(title = "Original drawing"): CloudKitRecord {
   const doc = buildInitialNoteDocument("\uFFFC", replica);
   doc.attributeRuns[0]!.attachmentInfo = create(AttachmentInfoSchema, {
     attachmentIdentifier: attachmentId,
@@ -44,7 +44,7 @@ function drawingRecord(): CloudKitRecord {
   return {
     recordName: noteId, recordType: "Note", recordChangeTag: "drawing-tag",
     fields: {
-      TitleEncrypted: { type: "ENCRYPTED_BYTES", value: Buffer.from("Original drawing").toString("base64") },
+      TitleEncrypted: { type: "ENCRYPTED_BYTES", value: Buffer.from(title).toString("base64") },
       TextDataEncrypted: { type: "ENCRYPTED_BYTES", value: compressNoteDocument(encodeNoteDocument(doc)).toString("base64") },
       Folder: { type: "REFERENCE", value: { recordName: folderId } },
       ModificationDate: { type: "TIMESTAMP", value: 100 },
@@ -52,10 +52,10 @@ function drawingRecord(): CloudKitRecord {
   };
 }
 
-for (const request of ["filename", "frontmatter"] as const) {
-  test(`push refuses an independent attachment title requested through ${request} without issuing a write`, async () => {
+for (const request of ["filename", "frontmatter", "body-and-title", "removed-title", "relocated-title", "different-replica"] as const) {
+  test(`push does not write an independent attachment title requested through ${request}`, async () => {
     const vault = await mkdtemp(path.join(home, "vault-"));
-    const record = drawingRecord();
+    const record = drawingRecord(request === "removed-title" ? "CON" : "Original drawing");
     const before = structuredClone(record);
     const classified = classifyNoteRecord(record, { titleMode: "filename" });
     assert.equal(classified.status, "ok");
@@ -63,16 +63,22 @@ for (const request of ["filename", "frontmatter"] as const) {
     assert.equal(classified.titleInMetadata, true);
     assert.equal(classified.publishable, true, "exercise a renderable drawing, not an earlier unsupported-body refusal");
     const body = classified.markdownText.replace("\uFFFC", formatEmbedMarker(classified.attachments[0]!));
-    const originalFile = "TEST/Original drawing.md";
-    const currentFile = request === "filename" ? "TEST/Changed drawing.md" : originalFile;
+    const originalFile = request === "removed-title" ? "TEST/Untitled.md" : "TEST/Original drawing.md";
+    const currentFile = request === "relocated-title" ? "OTHER/Changed drawing.md"
+      : request === "filename" || request === "different-replica" ? "TEST/Changed drawing.md" : originalFile;
+    const requestedTitle = request === "frontmatter" || request === "body-and-title" ? "Changed drawing" : undefined;
+    const cloneReplica = request === "different-replica" ? new Uint8Array(16).fill(9) : replica;
     await writeCloneState(vault, {
-      account, titleMode: "filename", replicaId: Buffer.from(replica).toString("base64"), syncToken: "",
-      folders: { [folderId]: { name: "TEST", dirName: "TEST" } },
-      notes: { [noteId]: { file: originalFile, recordChangeTag: "drawing-tag", modificationDate: 100, folderRecordName: folderId } },
+      account, titleMode: "filename", replicaId: Buffer.from(cloneReplica).toString("base64"), syncToken: "",
+      folders: { [folderId]: { name: "TEST", dirName: "TEST" }, "OTHER-FOLDER": { name: "OTHER", dirName: "OTHER" } },
+      notes: { [noteId]: { file: originalFile, recordChangeTag: "drawing-tag", modificationDate: 100, folderRecordName: folderId,
+        ...(request === "removed-title" ? { frontmatterTitle: "CON" } : {}),
+      } },
     });
     await mkdir(path.join(vault, "TEST"));
+    await mkdir(path.join(vault, "OTHER"));
     await writeBaseCopy(vault, noteId, body);
-    await writeFile(path.join(vault, currentFile), composeNoteFile("", body, noteId, request === "frontmatter" ? "Changed drawing" : undefined));
+    await writeFile(path.join(vault, currentFile), composeNoteFile("", request === "body-and-title" ? body + "\nEdited prose" : body, noteId, requestedTitle));
     await writeSessionFile({
       cookie: "fixture=local", clientId: "fixture", clientBuildNumber: "1", clientMasteringNumber: "1",
       capturedAt: new Date().toISOString(),

@@ -47,8 +47,9 @@ export type OkNoteDecodeResult = {
   attachments: AttachmentReference[];
   /** False when this note contains content we can't safely push - see
    * the Safety Guarantee Audit dev notes. `push` re-derives this from a fresh
-   * record for content edits. Independent-title metadata updates preserve
-   * every body/asset value and do not require a content round trip.
+   * record for content edits. Independent attachment titles are used for
+   * readable filenames; changing those titles is refused until native
+   * rename behavior is understood.
    * Since Step 1 of the formatting plan (2026-07-17), an embed we can't
    * *render* no longer clears this - such notes carry inline markers and
    * stay pushable under the marker-survival policy. A structure we can't

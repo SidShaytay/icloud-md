@@ -63,6 +63,21 @@ for (const text of ["\uFFFC\nOriginal body", "changed body"]) {
   });
 }
 
+for (const title of ["CON", "A drawing title that is too long to fit within the supported filename length limit"]) {
+  test(`unchanged frontmatter title ${JSON.stringify(title)} does not refuse a prose edit`, () => {
+    const record = scanRecord();
+    record.fields.TitleEncrypted = { value: Buffer.from(title).toString("base64"), type: "ENCRYPTED_BYTES" };
+    const classified = classifyNoteRecord(record, { titleMode: "filename" });
+    assert.equal(classified.status, "ok");
+    if (classified.status !== "ok") return;
+    assert.equal(classified.titleInMetadata, true);
+    const parsed = { text: "\uFFFC\nEdited prose", paragraphs: [] };
+    const summary = { conflicts: [] as string[], refused: [] as string[] };
+    assert.equal(restoreStrippedTitle(classified, parsed, entry, summary, title), parsed);
+    assert.deepEqual(summary.refused, []);
+  });
+}
+
 test("a permitted prose edit after an opaque first-line embed preserves its independent title", () => {
   const fields = buildNoteUpdateFields(scanRecord(), "new-document-bytes", "\uFFFC\nEdited prose", 200);
   assert.equal(Buffer.from(fields.TitleEncrypted?.value as string, "base64").toString(), "Old scan");
