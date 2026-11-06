@@ -233,22 +233,6 @@ export function buildNoteCreateFields(
   return fields;
 }
 
-/** A scan/drawing-first note has an independent display title. Preserve all
- * looked-up values, especially opaque body/asset fields, and change only the
- * title and modification time. No document or attachment is re-encoded. */
-export function buildNoteTitleMetadataFields(
-  current: CloudKitRecord,
-  title: string,
-  modificationDateMs: number,
-): Record<string, UpdateFieldValue> {
-  const fields: Record<string, UpdateFieldValue> = Object.fromEntries(
-    Object.entries(current.fields).map(([name, field]) => [name, { value: field.value }]),
-  );
-  fields.TitleEncrypted = { value: Buffer.from(title, "utf-8").toString("base64") };
-  fields.ModificationDate = { value: modificationDateMs };
-  return fields;
-}
-
 /** Assembles a content update: the re-encoded document, display metadata,
  * and the captured set of fields echoed from the looked-up record. */
 export function buildNoteUpdateFields(

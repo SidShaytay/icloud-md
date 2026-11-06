@@ -394,11 +394,11 @@ A few consequences worth knowing before you pick:
   something `pull` does and never something `push` does.
 - **Scan/drawing-first notes keep their attachments and independent title.**
   `pull` names them from Apple's display title, or `Untitled` if none is usable,
-  rather than from an object-replacement symbol. In filename-as-title mode,
-  renaming one or changing only `apple-note-title` updates the display title
-  and modification time without rewriting its document or attachments.
-  Ordinary attachment-body edits remain subject to the refusals below;
-  a title request combined with an unsupported body edit is still refused.
+  rather than from an object-replacement symbol. Renaming one locally or
+  requesting a different `apple-note-title` is refused: changing CloudKit's
+  display metadata alone does not reliably retitle it in native Apple Notes.
+  Rename it in Apple Notes, then pull. Existing attachment-body restrictions
+  still apply; this filename fix does not make those edits writable.
   Existing clones pick up corrected filenames through the normal pull rename
   path, including `--defer-renames`; no re-clone is needed.
 - **The mode is chosen once.** Switching an existing vault between the two
@@ -428,7 +428,7 @@ integration never gets to it.
 - **Body edits to regular file attachments (images, audio, other files)
   remain read-only.** `push` refuses these content edits because it cannot
   safely rebuild their internal format. A scan/drawing-first note's independent
-  title can still be changed without touching its content, as described above.
+  title must also be changed in Apple Notes, then pulled into the vault.
   `restore <file>` discards a local body edit to get back to a clean copy.
   Tables have a separate content-edit path — see above.
 - **Very large notes are read-only.** Past some size (seen on a note of

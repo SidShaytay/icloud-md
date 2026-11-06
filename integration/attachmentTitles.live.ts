@@ -22,7 +22,7 @@ describe("independent attachment titles", { concurrency: 1, skip: enabled ? fals
   });
   after(async () => { if (run !== undefined) await run.end(); });
 
-  it("pulls a useful filename, then renames and applies a title key without rewriting the embedded document", async () => {
+  it("pulls a useful filename and refuses independent title changes without rewriting the embedded document", async () => {
     const seedFile = `${run.title("attachment title seed")}.md`;
     await vault.writeNote(seedFile, "Disposable test note\n");
     assert.equal((await vault.push()).exitCode, 0);
@@ -76,21 +76,24 @@ describe("independent attachment titles", { concurrency: 1, skip: enabled ? fals
 
     const renamedTitle = run.title("renamed attachment title");
     await vault.renameNote(`${initialTitle}.md`, `${renamedTitle}.md`);
-    assert.equal((await vault.push()).exitCode, 0);
-    await verify(renamedTitle);
+    const renamed = await vault.push();
+    assert.equal(renamed.json.pushed, 0);
+    assert.equal(renamed.json.entries[0]?.resolution, "refused");
+    assert.match(renamed.json.entries[0]?.reason ?? "", /retitle.*Notes/);
+    await verify(initialTitle);
+    await vault.renameNote(`${renamedTitle}.md`, `${initialTitle}.md`);
 
     const metadataTitle = run.title("frontmatter attachment title");
-    const contents = await vault.readNote(`${renamedTitle}.md`);
-    await vault.writeNote(`${renamedTitle}.md`, contents.replace(/^---\n/, `---\napple-note-title: ${JSON.stringify(metadataTitle)}\n`));
+    const contents = await vault.readNote(`${initialTitle}.md`);
+    await vault.writeNote(`${initialTitle}.md`, contents.replace(/^---\n/, `---\napple-note-title: ${JSON.stringify(metadataTitle)}\n`));
     const pushed = await vault.push();
-    assert.equal(pushed.exitCode, 0);
-    const report = JSON.parse(pushed.stdout) as { pushed: number; entries: { outcome?: { succeeded: boolean } }[] };
-    assert.equal(report.pushed, 1, "a title-only metadata request must produce a real write");
-    assert.equal(report.entries[0]?.outcome?.succeeded, true);
-    await verify(metadataTitle);
-    await vault.pull();
-    assert.equal(await vault.findByNoteId(noteId), `${metadataTitle}.md`);
-    assert.equal((await vault.status()).exitCode, 0, "the title request must settle without repeat writes");
-    await verify(metadataTitle, true);
+    assert.equal(pushed.json.pushed, 0);
+    assert.equal(pushed.json.entries[0]?.resolution, "refused");
+    assert.match(pushed.json.entries[0]?.reason ?? "", /retitle.*Notes/);
+    assert.equal((await lookup(noteId)).recordChangeTag, baseline.recordChangeTag, "neither refused request may write the note");
+    await verify(initialTitle);
+    await vault.writeNote(`${initialTitle}.md`, contents);
+    assert.equal((await vault.status()).exitCode, 0);
+    await verify(initialTitle, true);
   });
 });

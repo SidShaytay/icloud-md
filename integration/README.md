@@ -128,11 +128,18 @@ npm run build && ICLOUD_MD_ITEST=1 npx tsx --test --test-name-pattern="carriage-
 
 The focused attachment-title test plants a captured Apple table, keeps its
 entire document behind an object-only first line, and sets an independent
-display title. It verifies pull filenames, local renames, and title-only
-`apple-note-title` requests while asserting that the compressed note and
-table payloads remain byte-identical. Apple's web client must still render
-the table and show the updated title in its note list. This tests metadata
-retitles, not image upload, scan editing, or drawing editing.
+display title. It verifies the pull filename and that both local renames and
+`apple-note-title` requests are refused without writing the note. The compressed
+note and table payloads must remain byte-identical, and Apple's web client must
+still render the original table. This covers reading an independent title and
+refusing unsupported retitles; it does not establish native scan/drawing edits.
+
+Native iPhone testing on 2026-11-05 showed why that distinction matters:
+CloudKit title updates could change the inside-note label without updating the
+note list, and an experimental edit-stamp workaround produced a duplicated
+drawing on the device despite passing local round-trip checks. That workaround
+is not part of the CLI. Keep attachment retitles refused until native-client
+behavior is understood and verified independently.
 
 It runs with the full suite, or alone:
 

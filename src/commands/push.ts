@@ -35,7 +35,7 @@ import { resolveNoteIds } from "../notes/noteIdPairing.js";
 import { listUntrackedMarkdownFiles } from "../notes/untrackedFiles.js";
 import { classifyNoteRecord, storesTextAsAsset, TEXT_AS_ASSET_REASON, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
-import { buildNoteCreateFields, buildNoteMoveFields, buildNoteTrashFields, buildNoteTitleMetadataFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
+import { buildNoteCreateFields, buildNoteMoveFields, buildNoteTrashFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
 import { noteDirOf, stateDirIndex, type StateDirInfo } from "../notes/folderLayout.js";
 import { planEmbedRepresentations } from "../notes/embedPushEdit.js";
 import { isEnoent } from "../fsUtil.js";
@@ -73,6 +73,7 @@ import {
 } from "../notes/noteDocument.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
+const INDEPENDENT_TITLE_REFUSAL = "this note's independent attachment title cannot be safely changed by this tool yet";
 
 /**
  * Why an edit to this tracked shared note can't be pushed, or undefined
@@ -935,7 +936,7 @@ export async function buildPushPlan(
     // Built during planning, like every other write, so `status` shows a
     // retitle that can't be applied as a refusal instead of discovering it
     // mid-push. Undefined when the pair is a plain relocation.
-    let retitle: { payloadBase64: string; plainText: string; metadataTitle?: string } | undefined;
+    let retitle: { payloadBase64: string; plainText: string } | undefined;
     if (pair.newTitle !== undefined) {
       const prepared = prepareRetitle(record, pair, replicaIdBytes, titleMode);
       if (!prepared.ok) {
@@ -988,9 +989,7 @@ export async function buildPushPlan(
           // Freshly against whatever the record now is: a preceding
           // relocation both advanced the change tag and is what the echoed
           // Folder reference has to come from.
-          const fields = retitle.metadataTitle !== undefined
-            ? buildNoteTitleMetadataFields(current, retitle.metadataTitle, Date.now())
-            : buildNoteUpdateFields(current, retitle.payloadBase64, retitle.plainText, Date.now());
+          const fields = buildNoteUpdateFields(current, retitle.payloadBase64, retitle.plainText, Date.now());
           const retitled = await modify(fields, current.recordChangeTag ?? "");
           if ("failure" in retitled) {
             return { succeeded: false, message: `${pair.toFile}: server rejected the retitle: ${retitled.failure}` };
@@ -1279,12 +1278,8 @@ export async function buildPushPlan(
     // it actually is. What's remembered is the key as the file has it, so a
     // removed key that asked for the title the note already has is settled
     // as removed.
-    let metadataTitle: string | undefined;
     if (candidate.titleOnly) {
       const classified = classifyNoteRecord(record, { titleMode });
-      if (classified.status === "ok" && classified.titleInMetadata && !storesTextAsAsset(record)) {
-        metadataTitle = requestedRetitle(classified, requestedTitle);
-      }
       if (classified.status === "ok" && requestedRetitle(classified, requestedTitle) === undefined) {
         state.notes[recordName] = { ...entry, frontmatterTitle: statedTitle };
         planningMutatedState = true;
@@ -1309,28 +1304,22 @@ export async function buildPushPlan(
         .filter(([, attachment]) => attachment.noteRecordName === recordName)
         .map(([attachmentRecordName]) => attachmentRecordName),
     );
-    const prepared: PreparedCandidate | undefined = metadataTitle !== undefined
-      ? {
-          updates: [noteRecordUpdate(record, entry, buildNoteTitleMetadataFields(record, metadataTitle, modificationDateMs))],
-          noteTextUpdated: true,
-          retitledTo: metadataTitle,
-        }
-      : await prepareUpdate(
-          session,
-          ckdatabasewsUrl,
-          dsid,
-          zone,
-          targetDir,
-          record,
-          entry,
-          localText,
-          trackedFileAttachmentIds,
-          replicaIdBytes,
-          modificationDateMs,
-          titleMode,
-          summary,
-          requestedTitle,
-        );
+    const prepared = await prepareUpdate(
+      session,
+      ckdatabasewsUrl,
+      dsid,
+      zone,
+      targetDir,
+      record,
+      entry,
+      localText,
+      trackedFileAttachmentIds,
+      replicaIdBytes,
+      modificationDateMs,
+      titleMode,
+      summary,
+      requestedTitle,
+    );
     if (!prepared) {
       const newConflict = summary.conflicts[conflictsBefore];
       const newRefusal = summary.refused[refusedBefore];
@@ -1786,7 +1775,7 @@ export function prepareRetitle(
   replicaId: Uint8Array,
   titleMode: TitleMode,
 ):
-  | { ok: true; retitle: { payloadBase64: string; plainText: string; metadataTitle?: string } | undefined }
+  | { ok: true; retitle: { payloadBase64: string; plainText: string } | undefined }
   | { ok: false; resolution: "refused" | "conflict"; reason: string } {
   // Undo whatever asked for the retitle: a new name, a removed key, or both.
   const oldName = path.posix.basename(pair.entry.file);
@@ -1807,20 +1796,11 @@ export function prepareRetitle(
     return refused(`renaming this note would retitle it, but the note is no longer safely editable (${detail})`);
   }
   if (classified.titleInMetadata && !storesTextAsAsset(record)) {
-    // Keep the entire embedded document opaque. Apple stores the visible title
-    // separately for scan/drawing-first notes; replacing its first paragraph
-    // would replace an attachment rather than a title.
+    // Reading this title is safe; changing CloudKit display metadata alone
+    // did not update the native iPhone list in the 2026-11-05 device test.
+    // Do not replace the embedded paragraph or synthesize an edit stamp.
     if (pair.newTitle === classified.title) return { ok: true, retitle: undefined };
-    const payload = record.fields.TextDataEncrypted?.value;
-    if (typeof payload !== "string") return refused("the note's inline body is missing");
-    return {
-      ok: true,
-      retitle: {
-        payloadBase64: payload,
-        plainText: classified.bodyText,
-        metadataTitle: pair.newTitle ?? "",
-      },
-    };
+    return refused(INDEPENDENT_TITLE_REFUSAL);
   }
   if (!classified.publishable) {
     return refused(
@@ -2079,11 +2059,11 @@ export function restoreStrippedTitle(
 ): { text: string; paragraphs: FormatParagraph[] } | undefined {
   if (classified.titleStripped !== true) {
     if (requestedTitle !== undefined) {
-      // Title-only metadata requests take a separate path. Do not silently
-      // ignore a title request when it arrived together with a body edit.
+      // A title request must not be silently ignored, or passed off as a
+      // successful display-metadata write the native client may not adopt.
       summary.refused.push(
         classified.titleInMetadata
-          ? `${entry.file}: apply "${NOTE_TITLE_KEY}" without a body edit first; this note's title is stored independently`
+          ? `${entry.file}: ${INDEPENDENT_TITLE_REFUSAL} - undo the "${NOTE_TITLE_KEY}" change and retitle it in Notes instead`
           : `${entry.file}: this note's title contains an embedded object, so "${NOTE_TITLE_KEY}" can't retitle it - ` +
             "retitle it in Notes instead.",
       );
