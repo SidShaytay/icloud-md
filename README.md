@@ -404,9 +404,9 @@ A few consequences worth knowing before you pick:
   re-clone is needed. Local body edits and explicit frontmatter title choices
   survive; files you deleted or renamed by hand are left alone. Existing
   in-body vaults keep their stable filenames.
-  An opt-in [Mac-assisted drawing-title companion](docs/mac-title-bridge.md)
-  has passed two supervised cross-device renames for its supported Mac profile.
-  It is disabled by default and does not relax the ordinary push refusal.
+  icloud-md sync runs independently of native devices; a Mac helper is not
+  required. Local attachment-title renames remain unsupported until they can
+  be performed entirely through icloud-md and verified in native Apple Notes.
 - **The mode is chosen once.** Switching an existing vault between the two
   shapes isn't supported yet: it would have to rewrite every file in the
   vault, which is a different (and more dangerous) operation than the

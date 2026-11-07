@@ -949,8 +949,8 @@ export async function buildPushPlan(
     const folderRecordName = pair.folderRecordName;
     const classifiedMove = classifyNoteRecord(record, { titleMode });
     const currentFolder = (record.fields.Folder?.value as { recordName?: string } | undefined)?.recordName;
-    // A Mac-assisted retitle already changed the remote metadata. Settling
-    // its same-folder filename must not echo document/asset fields again.
+    // When the remote title already matches, settling its same-folder filename
+    // must not echo document/asset fields again.
     const localOnly = !pair.relocated && pair.newTitle !== undefined && retitle === undefined
       && currentFolder === folderRecordName && classifiedMove.status === "ok" && classifiedMove.titleInMetadata;
     entries.push({
