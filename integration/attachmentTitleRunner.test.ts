@@ -240,3 +240,20 @@ test("approved plan is bound to the exact sync lock authority", () => fixture(as
   await assert.rejects(runAttachmentTitleRunner(options, { ...f.ports, lockAuthority: async () => ({ path: "/fixture/unrelated.lock", dev: "1", ino: "3" }) }), /plan|lock/i);
   assert.equal(f.writes.length, 0);
 }));
+
+test("native top-level folder may omit the Deleted field", () => fixture(async f => {
+  f.cloud[2]!.deleted = false;
+  f.cloud[2]!.fields = { TitleEncrypted: { type: "ENCRYPTED_BYTES", value: encoded("TEST") } };
+  const result = await runAttachmentTitleRunner(f.options, f.ports);
+  assert.equal(result.status, "preview");
+  assert.equal(f.writes.length, 0);
+}));
+
+for (const deletion of ["field-deleted", "malformed-field", "record-deleted"] as const) {
+  test(`folder ${deletion} refuses the title experiment`, () => fixture(async f => {
+    if (deletion === "record-deleted") f.cloud[2]!.deleted = true;
+    else f.cloud[2]!.fields.Deleted = deletion === "field-deleted" ? { type: "INT64", value: 1 } : { type: "STRING", value: 0 };
+    await assert.rejects(runAttachmentTitleRunner(f.options, f.ports), /folder/i);
+    assert.equal(f.writes.length, 0);
+  }));
+}

@@ -124,7 +124,10 @@ async function folderSnapshot(local: LocalIntent, io: TitleProbeIO) {
   for (const folder of local.folders) {
     const record = records.find(item => sameId(item.recordName, folder.id));
     const decoded = record && decodeFolderRecord(record);
-    assert.ok(record && decoded && record.recordChangeTag && !record.deleted && record.fields.Deleted?.value === 0 && !record.shareRecordName && decoded.parentRecordName === folder.parent, "Shared/private folder ancestry changed");
+    // Native top-level Folder captures may carry only TitleEncrypted. An
+    // explicit deletion field must still be a valid undeleted INT64.
+    const deletion = record?.fields.Deleted;
+    assert.ok(record && decoded && record.recordChangeTag && record.deleted !== true && (deletion === undefined || (deletion.type === "INT64" && deletion.value === 0)) && !record.shareRecordName && decoded.parentRecordName === folder.parent, "Shared/private folder ancestry changed");
   }
   return records.sort((a, b) => a.recordName.localeCompare(b.recordName));
 }
