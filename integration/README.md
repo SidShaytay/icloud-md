@@ -155,14 +155,32 @@ state only. Neither calls, waits for, or accepts acknowledgements from a Mac.
 Preview is offline by default; applying a phase requires an explicit option and
 a private operation journal. Uncertain writes are never automatically replayed.
 
-This is an integration helper, not a supported rename command or a live test
-runner. It checks supplied record snapshots, document bytes and asset references;
-the caller still needs independently checked asset bytes, unchanged local files,
-and exclusion of concurrent normal sync before a live experiment. Native list
-refresh, including after an offline device reconnects, remains unproven.
-Its results explicitly say native verification is outstanding, and ordinary
-`push` continues to refuse these renames. Native devices may only observe the
-result of the independent Linux write path.
+The checked experimental caller is `attachmentTitleRunner.ts`, launched through
+`integration/runAttachmentTitleProbe` on Linux. It verifies the unchanged local
+filename request, account/private-folder scope, exact compressed document and
+all drawing/preview bytes. It captures private evidence before and after a
+write. Its approved preview digest binds those inputs, executable source,
+deadline, journal path and the actual held sync-lock descriptor. A different
+request, stale plan, changed local file or uncertain earlier phase stops it.
+
+Read the invocation flags without connecting to an account:
+
+```bash
+node --import tsx integration/attachmentTitleRunnerCli.ts --help
+```
+
+For a separately approved live trial, pause normal automatic sync, wait for its
+current run to finish, and set `ICLOUD_MD_PROBE_LOCK_PATH` to that writer's exact
+lock file before invoking the wrapper. Keep automatic sync paused throughout:
+systemd can remove a runtime lock directory when its service exits. Preview is
+the default and performs only cloud reads; applying requires the matching
+`--expected-plan` digest and `--apply`. Keep one fixed private journal per
+rename; never substitute a fresh journal to replay an uncertain operation.
+
+This is test tooling, not a supported rename command. Native list refresh,
+including after an offline device reconnects, remains unproven. Results explicitly
+say native verification is outstanding, and ordinary `push` continues to refuse
+these renames. Native devices may only observe the independent Linux write path.
 
 ## Containment
 

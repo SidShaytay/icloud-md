@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Linux-only experimental caller. Use the normal sync writer's exact lock path.
+# Pause its timer and wait for an inactive service before starting a live trial.
+set -euo pipefail
+
+: "${ICLOUD_MD_PROBE_LOCK_PATH:?Set ICLOUD_MD_PROBE_LOCK_PATH to the normal sync lock file}"
+case "$ICLOUD_MD_PROBE_LOCK_PATH" in
+  /*) ;;
+  *) echo 'The normal sync lock path must be absolute' >&2; exit 2 ;;
+esac
+
+umask 077
+# Read/write open preserves an existing file. The TS verifier rejects symlinks,
+# changed inodes and descriptors that do not actually own an exclusive flock.
+exec 9<>"$ICLOUD_MD_PROBE_LOCK_PATH"
+flock --nonblock --conflict-exit-code 75 9
+export ICLOUD_MD_PROBE_LOCK_FD=9
+
+probe_project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd -- "$probe_project_root"
+exec node --import tsx "$probe_project_root/integration/attachmentTitleRunnerCli.ts" "$@"
