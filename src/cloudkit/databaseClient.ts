@@ -156,6 +156,7 @@ async function postDatabase(
   database: CloudKitDatabase,
   operation: string,
   body: unknown,
+  options: CloudKitWriteOptions = {},
 ): Promise<unknown> {
   const params = new URLSearchParams({
     ckjsBuildVersion: CKJS_BUILD_VERSION,
@@ -179,6 +180,8 @@ async function postDatabase(
         Accept: "application/json",
       },
       body: JSON.stringify(body),
+      ...(options.redirect === undefined ? {} : { redirect: options.redirect }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     },
   );
 
@@ -1110,6 +1113,10 @@ export interface RecordUpdate {
 
 export type RecordUpdateResult = NoteUpdateResult;
 
+/** Optional transport controls for writes that must not follow redirects or
+ * outlive their caller's deadline. Existing callers retain fetch defaults. */
+export type CloudKitWriteOptions = Pick<RequestInit, "redirect" | "signal">;
+
 /**
  * Updates any number of records in one zone via a single `records/modify`
  * call with one `update` operation per record - the real CloudKit endpoint
@@ -1130,6 +1137,7 @@ export async function updateRecords(
   database: CloudKitDatabase,
   zoneID: CloudKitZoneID,
   updates: RecordUpdate[],
+  options?: CloudKitWriteOptions,
 ): Promise<RecordUpdateResult[]> {
   const operations = updates.map((update) => {
     const record: Record<string, unknown> = {
@@ -1152,6 +1160,7 @@ export async function updateRecords(
     database,
     "records/modify",
     { operations, zoneID },
+    options,
   );
   return parseRecordUpdateResponse(body);
 }
