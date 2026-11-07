@@ -404,6 +404,9 @@ A few consequences worth knowing before you pick:
   re-clone is needed. Local body edits and explicit frontmatter title choices
   survive; files you deleted or renamed by hand are left alone. Existing
   in-body vaults keep their stable filenames.
+  An opt-in [Mac-assisted drawing-title companion](docs/mac-title-bridge.md)
+  is under supervised testing. It is disabled by default and does not relax
+  the ordinary push refusal.
 - **The mode is chosen once.** Switching an existing vault between the two
   shapes isn't supported yet: it would have to rewrite every file in the
   vault, which is a different (and more dangerous) operation than the
