@@ -148,6 +148,22 @@ npm run build
 ICLOUD_MD_ITEST=1 npx tsx --test integration/attachmentTitles.live.ts
 ```
 
+The experimental `attachmentTitleProbe.ts` helper isolates two CloudKit-only
+metadata phases: A changes the drawing's `UserTitle`; a separate invocation of B
+changes the containing note's title and modification date. Both use Linux/cloud
+state only. Neither calls, waits for, or accepts acknowledgements from a Mac.
+Preview is offline by default; applying a phase requires an explicit option and
+a private operation journal. Uncertain writes are never automatically replayed.
+
+This is an integration helper, not a supported rename command or a live test
+runner. It checks supplied record snapshots, document bytes and asset references;
+the caller still needs independently checked asset bytes, unchanged local files,
+and exclusion of concurrent normal sync before a live experiment. Native list
+refresh, including after an offline device reconnects, remains unproven.
+Its results explicitly say native verification is outstanding, and ordinary
+`push` continues to refuse these renames. Native devices may only observe the
+result of the independent Linux write path.
+
 ## Containment
 
 Fixtures are confined to a dedicated Notes folder, and two independent keys
