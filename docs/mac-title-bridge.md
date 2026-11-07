@@ -1,6 +1,6 @@
 # Rename a drawing note with a Mac
 
-This experimental companion connects a Vega filename rename to the drawing's custom title and the Mac's native note name. It is disabled by default. The native Mac name operation has passed a supervised preservation and restart check; the complete filename-to-both-devices workflow still needs its two supervised tests before automatic use.
+This opt-in companion connects a Vega filename rename to the drawing's custom title and the Mac's native note name. It is disabled by default. Two successive supervised Vega renames passed on iPhone and Mac after reopening both apps and another sync cycle, with unchanged document/drawing data, one drawing and no added heading. Verification covers the Mac profile and narrow note shape below; other configurations remain unsupported.
 
 It currently accepts only explicitly listed, private drawing-only notes (`com.apple.paper`), with one drawing, an unchanged body, and a filename change within the same folder. Ordinary `icloud-md push` keeps its existing refusal. Frontmatter title edits, shared notes, folder moves, surrounding prose, and other attachment types remain unsupported.
 
@@ -72,4 +72,4 @@ The private journal must stay outside the vault. It contains the before-state an
 
 A changed local file, another title choice, an unsupported Mac build, or changed drawing data stops the operation. An uncertain final note-title event remains ambiguous even if its title already matches; an equal title does not prove that event happened.
 
-Before enabling this in everyday sync, verify two successive Vega renames in both native Notes lists, with one unchanged drawing after reopening the apps and another sync cycle. Automatic use must call this companion before accepting the ordinary push preview, pull again after completion, refuse any remaining managed move unless explicitly marked `localOnly: true`, and stop on pending or ambiguous results. During supervised tests, allow only a separately reviewed local-only index update, then require an empty preview before any subsequent normal push.
+The verified setup completed two successive Vega renames in both native Notes lists, with one unchanged drawing after reopening the apps and another sync cycle. Retest those conditions when supporting another Mac profile or note shape. Automatic use must call this companion before accepting the ordinary push preview, pull again after completion, refuse any remaining managed move unless explicitly marked `localOnly: true`, and stop on pending or ambiguous results. During supervised tests, allow only a separately reviewed local-only index update, then require an empty preview before any subsequent normal push.
