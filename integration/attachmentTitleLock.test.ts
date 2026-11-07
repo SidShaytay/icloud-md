@@ -8,7 +8,7 @@ import { test } from "node:test";
 
 const execute = promisify(execFile);
 const moduleUrl = new URL("./attachmentTitleLock.ts", import.meta.url).href;
-const verify = `const { assertAttachmentTitleLockHeld } = await import(${JSON.stringify(moduleUrl)}); await assertAttachmentTitleLockHeld(); console.log('verified');`;
+const verify = `const { assertAttachmentTitleLockHeld, getAttachmentTitleLockAuthority } = await import(${JSON.stringify(moduleUrl)}); await assertAttachmentTitleLockHeld(); const authority = await getAttachmentTitleLockAuthority(); console.log(JSON.stringify(authority));`;
 
 async function fixture(run: (directory: string) => Promise<void>) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "title-probe-lock-"));
@@ -35,7 +35,10 @@ async function refused(result: Promise<unknown>, message: string) {
 
 test("a real inherited exclusive flock is accepted", () => fixture(async directory => {
   const lock = path.join(directory, "sync.lock");
-  assert.equal((await worker(lock, lock, true)).stdout.trim(), "verified");
+  const authority = JSON.parse((await worker(lock, lock, true)).stdout);
+  assert.equal(authority.path, lock);
+  assert.match(authority.dev, /^\d+$/);
+  assert.match(authority.ino, /^\d+$/);
 }));
 
 test("an open descriptor without an acquired flock cannot authorize apply", () => fixture(async directory => {
