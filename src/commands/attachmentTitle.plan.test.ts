@@ -16,7 +16,7 @@ const { buildInitialNoteDocument, encodeNoteDocument } = await import("../notes/
 const { compressNoteDocument } = await import("../notes/noteText.js");
 const { classifyNoteRecord } = await import("../notes/decodeNoteRecord.js");
 const { formatEmbedMarker } = await import("../notes/unknownContent.js");
-const { writeCloneState } = await import("../notes/cloneState.js");
+const { writeCloneState, readCloneState } = await import("../notes/cloneState.js");
 const { writeBaseCopy } = await import("../notes/baseCopy.js");
 const { composeNoteFile } = await import("../notes/noteIdFrontmatter.js");
 const { writeSessionFile } = await import("../session.js");
@@ -52,10 +52,10 @@ function drawingRecord(title = "Original drawing"): CloudKitRecord {
   };
 }
 
-for (const request of ["filename", "frontmatter", "body-and-title", "removed-title", "relocated-title", "different-replica"] as const) {
+for (const request of ["filename", "frontmatter", "body-and-title", "removed-title", "relocated-title", "different-replica", "already-current"] as const) {
   test(`push does not write an independent attachment title requested through ${request}`, async () => {
     const vault = await mkdtemp(path.join(home, "vault-"));
-    const record = drawingRecord(request === "removed-title" ? "CON" : "Original drawing");
+    const record = drawingRecord(request === "removed-title" ? "CON" : request === "already-current" ? "Changed drawing" : "Original drawing");
     const before = structuredClone(record);
     const classified = classifyNoteRecord(record, { titleMode: "filename" });
     assert.equal(classified.status, "ok");
@@ -65,7 +65,7 @@ for (const request of ["filename", "frontmatter", "body-and-title", "removed-tit
     const body = classified.markdownText.replace("\uFFFC", formatEmbedMarker(classified.attachments[0]!));
     const originalFile = request === "removed-title" ? "TEST/Untitled.md" : "TEST/Original drawing.md";
     const currentFile = request === "relocated-title" ? "OTHER/Changed drawing.md"
-      : request === "filename" || request === "different-replica" ? "TEST/Changed drawing.md" : originalFile;
+      : request === "filename" || request === "different-replica" || request === "already-current" ? "TEST/Changed drawing.md" : originalFile;
     const requestedTitle = request === "frontmatter" || request === "body-and-title" ? "Changed drawing" : undefined;
     const cloneReplica = request === "different-replica" ? new Uint8Array(16).fill(9) : replica;
     await writeCloneState(vault, {
@@ -117,10 +117,17 @@ for (const request of ["filename", "frontmatter", "body-and-title", "removed-tit
     try {
       const result = await runPush(vault);
       assert.equal(modifications, 0, "refusal must occur before records/modify");
-      assert.equal(result.pushed, 0);
       assert.equal(result.entries.length, 1);
-      assert.equal(result.entries[0]?.resolution, "refused");
-      assert.match(result.entries[0]?.reason ?? "", /retitle.*Notes/i);
+      if (request === "already-current") {
+        assert.equal(result.pushed, 1);
+        assert.equal(result.entries[0]?.resolution, "ready");
+        assert.equal(result.entries[0]?.localOnly, true);
+        assert.equal((await readCloneState(vault))?.notes[noteId]?.file, currentFile);
+      } else {
+        assert.equal(result.pushed, 0);
+        assert.equal(result.entries[0]?.resolution, "refused");
+        assert.match(result.entries[0]?.reason ?? "", /retitle.*Notes/i);
+      }
       assert.deepEqual(record, before);
     } finally {
       globalThis.fetch = originalFetch;

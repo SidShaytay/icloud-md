@@ -947,9 +947,16 @@ export async function buildPushPlan(
     }
 
     const folderRecordName = pair.folderRecordName;
+    const classifiedMove = classifyNoteRecord(record, { titleMode });
+    const currentFolder = (record.fields.Folder?.value as { recordName?: string } | undefined)?.recordName;
+    // A Mac-assisted retitle already changed the remote metadata. Settling
+    // its same-folder filename must not echo document/asset fields again.
+    const localOnly = !pair.relocated && pair.newTitle !== undefined && retitle === undefined
+      && currentFolder === folderRecordName && classifiedMove.status === "ok" && classifiedMove.titleInMetadata;
     entries.push({
       ...base,
       resolution: "ready",
+      ...(localOnly ? { localOnly: true, remark: "title already matches; update local filename tracking only" } : {}),
       execute: async () => {
         if (failedFolders.has(folderRecordName)) {
           return { succeeded: false, message: `${pair.toFile}: skipped - the folder it moved into could not be created` };
@@ -978,7 +985,7 @@ export async function buildPushPlan(
         // reverse order would strand a note under its new title in its old
         // folder, which reads like the tool did nothing.
         let current = record;
-        if (pair.relocated || retitle === undefined) {
+        if (!localOnly && (pair.relocated || retitle === undefined)) {
           const moved = await modify(buildNoteMoveFields(current, folderRecordName, Date.now()), current.recordChangeTag ?? "");
           if ("failure" in moved) {
             return { succeeded: false, message: `${pair.toFile}: server rejected the move: ${moved.failure}` };
