@@ -155,6 +155,15 @@ state only. Neither calls, waits for, or accepts acknowledgements from a Mac.
 Preview is offline by default; applying a phase requires an explicit option and
 a private operation journal. Uncertain writes are never automatically replayed.
 
+The alternative terminal phase `BA` sends one explicit atomic batch containing
+the note's title/date followed by the drawing's `UserTitle` reassertion, using
+the [CloudKit records/modify request contract](https://developer.apple.com/library/archive/documentation/DataManagement/Conceptual/CloudKitWebServicesReference/ModifyRecords.html).
+`B` and `BA` are mutually exclusive: a shared durable terminal claim prevents
+using one as a retry of the other. Server-side atomicity and operation order do
+not establish native import order. The separate A/B trial passed with a connected
+Mac but left its list title stale when Notes was closed during the writes and
+reopened afterward; BA remains a diagnostic candidate, not a proven replacement.
+
 The checked experimental caller is `attachmentTitleRunner.ts`, launched through
 `integration/runAttachmentTitleProbe` on Linux. It verifies the unchanged local
 filename request, account/private-folder scope, exact compressed document and

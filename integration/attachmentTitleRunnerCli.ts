@@ -19,11 +19,13 @@ Run through integration/runAttachmentTitleProbe with ICLOUD_MD_PROBE_LOCK_PATH
 set to the normal sync writer's lock; pause that writer's timer during a trial.
 
 Required: --vault ABS --file RELATIVE.md --note UUID --attachment UUID
-          --folder UUID --journal ABS --phase A|B
+          --folder UUID --journal ABS --phase A|B|BA
           --modification-date MILLISECONDS --deadline MILLISECONDS
 Apply:    --expected-plan PREVIEW_SHA256 --apply
 
 A changes drawing UserTitle. A separate B changes note title/date.
+Alternative BA atomically updates note title/date, then reasserts drawing UserTitle.
+B and BA are mutually exclusive terminal choices for one operation.
 No phase contacts or waits for a native device. A cloud result is native-unverified.
 An ambiguous result exits 3 and must not be replayed or automatically rolled back.`;
 
