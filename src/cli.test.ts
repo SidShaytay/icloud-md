@@ -101,3 +101,9 @@ test("install-browser is a listed command", async () => {
   const { stdout } = await runCli(["install-browser", "--help"]);
   assert.match(stdout, /bundled sign-in browser/);
 });
+
+test("drawing title renames require an explicit experimental private-journal option", async () => {
+  const { stdout } = await runCli(["push", "--help"]);
+  assert.match(stdout, /--experimental-drawing-titles <directory>/);
+  assert.match(stdout, /causal|CRDT/);
+});
