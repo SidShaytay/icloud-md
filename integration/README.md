@@ -183,8 +183,19 @@ character and style references now translate through sorted UUID rank at the wir
 boundary, with independent wire-identity regressions. The failed trial requires a
 forward causal repair of its accidental atom; correcting the codec alone does not
 delete copies already merged by a client. Do not replay its journal or restore an
-older raw document. A corrected BD trial and native preservation checks are still
-required before enabling a production rename path.
+older raw document. The corrected BD trial preserved
+the document but still left the native title one rename behind after closed-client
+catch-up; it is rejected as an end-to-end rename fix.
+
+The `BR` alternative tests a physical character replacement. It uses the ordinary
+editor to tombstone the old drawing character and generate a fresh live character
+referencing the **same attachment ID and UTI**, with identical serialized formatting.
+Only the final one-drawing document is uploaded. The fresh character precedes the
+old tombstone, retaining unseen native descendants such as a local trailing newline.
+Character coordinates, the old character's style timestamp and causal document bytes
+change intentionally; asset bytes, references and note identity must not change.
+All four terminal alternatives share a durable claim. This remains a diagnostic
+until native title refresh and preservation have been verified.
 
 The checked experimental caller is `attachmentTitleRunner.ts`, launched through
 `integration/runAttachmentTitleProbe` on Linux. It verifies the unchanged local

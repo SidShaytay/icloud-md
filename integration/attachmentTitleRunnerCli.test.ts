@@ -35,3 +35,12 @@ test("CLI explicitly reports only the safe document-revision summary", async () 
   assert.deepEqual(JSON.parse(output[0]!).documentRevision, summary);
   assert.doesNotMatch(output[0]!, /private-url|rawRecords/);
 });
+
+
+test("CLI discloses physical drawing replacement without exposing raw payloads", async () => {
+  const output: string[] = [];
+  const summary = { strategy: "replace-drawing-v1", previousDocumentSha256: "a".repeat(64), documentSha256: "b".repeat(64), replicaIdSha256: "c".repeat(64) };
+  const code = await attachmentTitleRunnerCli([], { run: async () => ({ status: "preview", phase: "BR", documentRevision: { ...summary, rawDocument: "private" } }),
+    stdout: text => output.push(text), stderr: () => {} });
+  assert.equal(code, 0); assert.deepEqual(JSON.parse(output[0]!).documentRevision, summary);
+});

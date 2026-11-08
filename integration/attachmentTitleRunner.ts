@@ -78,7 +78,7 @@ function versions(capture: DrawingCapture) { return capture.records.map(record =
 
 export async function runAttachmentTitleRunner(input: TitleRunnerOptions, overrides: Partial<TitleRunnerPorts> = {}): Promise<RunnerResult> {
   const options = structuredClone(input), ports = { ...defaults, ...overrides };
-  assert.ok([options.noteId, options.attachmentId, options.folderId].every(isNoteId) && (options.phase === "A" || options.phase === "B" || options.phase === "BA" || options.phase === "BD"), "Invalid runner identity/phase");
+  assert.ok([options.noteId, options.attachmentId, options.folderId].every(isNoteId) && (options.phase === "A" || options.phase === "B" || options.phase === "BA" || options.phase === "BD" || options.phase === "BR"), "Invalid runner identity/phase");
   const checkDeadline = () => assert.ok(Number.isSafeInteger(options.deadline) && options.deadline > ports.now() && options.deadline - ports.now() <= 30 * 60_000, "Approval deadline expired or invalid");
   assert.ok(Number.isSafeInteger(options.modificationDate) && options.modificationDate > 0 && path.isAbsolute(options.journalDirectory), "Invalid date/journal");
   if (options.apply) { assert.ok(options.expectedPlanSha256 && /^[a-f0-9]{64}$/.test(options.expectedPlanSha256), "Apply requires an approved preview plan"); await ports.assertLock(); }
@@ -98,7 +98,7 @@ export async function runAttachmentTitleRunner(input: TitleRunnerOptions, overri
   const saved = savedText === undefined ? undefined : JSON.parse(savedText) as SavedBaseline;
   if (saved) { assert.ok(saved.version === 1 && saved.codeSha256 === codeSha256, "Existing baseline/code changed"); equal(saved.local, local, "Existing local intent changed"); equal(saved.lockAuthority, lockAuthority, "Existing sync lock authority changed"); }
   if (options.phase !== "A") {
-    for (const alternate of ["B", "BA", "BD"]) if (alternate !== options.phase) assert.ok(await readProbeJournal(path.join(journal, `${alternate}.request.json`)) === undefined, "Another terminal caller intent exists; never retry through an alternate");
+    for (const alternate of ["B", "BA", "BD", "BR"]) if (alternate !== options.phase) assert.ok(await readProbeJournal(path.join(journal, `${alternate}.request.json`)) === undefined, "Another terminal caller intent exists; never retry through an alternate");
     assert.ok(saved, "Phase A baseline is required");
     const a = await readProbeJournal(path.join(journal, "A.result.json"));
     assert.ok(a && JSON.parse(a).status === "cloud-applied-native-unverified", "Phase A has no complete acknowledgement");
@@ -180,7 +180,7 @@ export function parseAttachmentTitleRunnerArgs(args: string[]): TitleRunnerOptio
   }
   assert.ok(names.filter(name => name !== "expected-plan").every(name => values[name]), "Missing runner argument");
   assert.ok(!apply || /^[a-f0-9]{64}$/.test(values["expected-plan"] ?? ""), "Apply requires approved preview plan");
-  assert.ok(values.phase === "A" || values.phase === "B" || values.phase === "BA" || values.phase === "BD", "Invalid runner phase");
+  assert.ok(values.phase === "A" || values.phase === "B" || values.phase === "BA" || values.phase === "BD" || values.phase === "BR", "Invalid runner phase");
   return { vault: values.vault!, file: values.file!, noteId: values.note!, attachmentId: values.attachment!, folderId: values.folder!, journalDirectory: values.journal!, phase: values.phase,
     modificationDate: Number(values["modification-date"]), deadline: Number(values.deadline), apply, ...(values["expected-plan"] ? { expectedPlanSha256: values["expected-plan"] } : {}) };
 }

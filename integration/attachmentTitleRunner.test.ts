@@ -326,3 +326,31 @@ test("a prior ambiguous BA caller intent blocks BD before any new dispatch", () 
   await assert.rejects(runAttachmentTitleRunner({ ...f.options, phase: "BD" }, f.ports), /terminal|another|alternate/i);
   assert.equal(f.writes.length, 1);
 }));
+
+
+test("explicit replacement phase parses without opening an account", () => {
+  const options = parseAttachmentTitleRunnerArgs(["--vault", "/fixture/vault", "--file", "TEST/New.md", "--note", noteId,
+    "--attachment", attachmentId, "--folder", folderId, "--journal", "/fixture/journal", "--phase", "BR",
+    "--modification-date", "2000", "--deadline", "10000"]);
+  assert.equal(options.phase, "BR");
+});
+
+
+test("BR caller binds and preserves its exact computed revision and asset bytes", () => fixture(async f => {
+  await runAttachmentTitleRunner(await approved(f), f.ports);
+  const options = { ...f.options, phase: "BR" as const, modificationDate: 3_000 };
+  const preview = await runAttachmentTitleRunner(options, f.ports);
+  assert.equal(preview.documentRevision?.strategy, "replace-drawing-v1");
+  const outcome = await runAttachmentTitleRunner({ ...options, apply: true, expectedPlanSha256: preview.planSha256 }, f.ports);
+  assert.equal(outcome.status, "cloud-applied-native-unverified"); assert.deepEqual(outcome.documentRevision, preview.documentRevision);
+  assert.equal(f.writes.length, 2);
+  assert.equal(sha(Buffer.from(f.cloud[0]!.fields.TextDataEncrypted!.value as string, "base64")), preview.documentRevision!.documentSha256);
+}));
+
+
+test("an ambiguous replacement caller intent excludes metadata and dead-character alternatives", () => fixture(async f => {
+  await runAttachmentTitleRunner(await approved(f), f.ports);
+  await writeFile(path.join(f.options.journalDirectory, "BR.request.json"), "{}", { mode: 0o600 });
+  for (const phase of ["B", "BA", "BD"] as const) await assert.rejects(runAttachmentTitleRunner({ ...f.options, phase }, f.ports), /terminal|alternate|another/i);
+  assert.equal(f.writes.length, 1);
+}));

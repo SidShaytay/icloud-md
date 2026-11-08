@@ -311,21 +311,42 @@ test("BD discloses and writes only the internally computed neutral document revi
   assert.equal(after.runs.length, before.runs.length + 1); assert.deepEqual(f.cloud[1], request.expected[1]);
 }));
 
-test("BD refuses any payload beyond its exact deterministic revision", () => fixture(async f => {
+for (const phase of ["BD", "BR"] as const) test(`${phase} refuses any payload beyond its exact deterministic revision`, () => fixture(async f => {
   await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
-  const request = { ...f.request, phase: "BD" as const, expected: structuredClone(f.cloud) };
+  const request = { ...f.request, phase, expected: structuredClone(f.cloud) };
   const io = { ...f.io, update: async (update: RecordUpdate) => { await f.io.update(update); f.cloud[0]!.fields.TextDataEncrypted = structuredClone(f.request.baseline[0]!.fields.TextDataEncrypted!); } };
   assert.equal((await runAttachmentTitleProbe(request, { apply: true }, io)).status, "ambiguous");
   assert.equal((await runAttachmentTitleProbe(request, { apply: true }, io)).status, "ambiguous");
   assert.equal(f.writes.length, 2);
 }));
 
-for (const first of ["B", "BA", "BD"] as const) {
+for (const first of ["B", "BA", "BD", "BR"] as const) {
   test(`terminal ${first} history excludes every other document/batch alternative`, () => fixture(async f => {
     await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
     const expected = structuredClone(f.cloud), fail = async () => { throw Error("uncertain terminal dispatch"); };
     assert.equal((await runAttachmentTitleProbe({ ...f.request, phase: first, expected }, { apply: true }, { ...f.io, update: fail, updateBatch: fail })).status, "ambiguous");
-    for (const other of ["B", "BA", "BD"] as const) if (other !== first) await assert.rejects(runAttachmentTitleProbe({ ...f.request, phase: other, expected }, { apply: true }, f.io), /terminal|another|alternate/i);
+    for (const other of ["B", "BA", "BD", "BR"] as const) if (other !== first) await assert.rejects(runAttachmentTitleProbe({ ...f.request, phase: other, expected }, { apply: true }, f.io), /terminal|another|alternate/i);
     assert.equal(f.writes.length, 1);
   }));
 }
+
+
+test("BR writes only a computed final replacement with the same attachment and formatting", () => fixture(async f => {
+  await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
+  const request = { ...f.request, phase: "BR" as const, expected: structuredClone(f.cloud) };
+  const preview = await runAttachmentTitleProbe(request);
+  assert.equal(preview.documentRevision?.strategy, "replace-drawing-v1");
+  const result = await runAttachmentTitleProbe(request, { apply: true }, f.io);
+  assert.equal(result.status, "cloud-applied-native-unverified"); assert.deepEqual(result.documentRevision, preview.documentRevision);
+  assert.deepEqual(Object.keys(f.writes[1]!.fields), ["TitleEncrypted", "ModificationDate", "TextDataEncrypted"]);
+  const before = parseNoteDocument(decompressNoteDocument(Buffer.from(f.request.baseline[0]!.fields.TextDataEncrypted!.value as string, "base64")));
+  const after = parseNoteDocument(decompressNoteDocument(Buffer.from(f.cloud[0]!.fields.TextDataEncrypted!.value as string, "base64")));
+  assert.equal(after.text, before.text); assert.deepEqual(after.attributeRuns, before.attributeRuns);
+  const old = before.runs.find(run => run.length > 0 && !run.tombstone)!;
+  const replaced = after.runs.find(run => run.coord.replica === old.coord.replica && run.coord.clock === old.coord.clock)!;
+  assert.ok(replaced.tombstone);
+  const live = after.runs.filter(run => run.length > 0 && !run.tombstone);
+  assert.equal(live.length, 1); assert.notDeepEqual(live[0]!.coord, old.coord);
+  assert.deepEqual(f.cloud[1], request.expected[1]);
+  assert.deepEqual(after.replicas.slice(0, before.replicas.length), before.replicas);
+}));

@@ -11,7 +11,7 @@ import { isNoteId } from "./noteIdFrontmatter.js";
 import { compressNoteDocument } from "./noteText.js";
 
 export interface DocumentRevisionSummary {
-  strategy: "trailing-tombstone-v1";
+  strategy: "trailing-tombstone-v1" | "replace-drawing-v1";
   previousDocumentSha256: string;
   documentSha256: string;
   replicaIdSha256: string;
