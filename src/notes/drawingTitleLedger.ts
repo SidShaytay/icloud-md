@@ -113,11 +113,12 @@ function hashes(value: Pick<DrawingTitleLeaseIntent, typeof digestFields[number]
   assert.match(value[key], /^[a-f0-9]{64}$/, "Invalid lease fingerprint"); }
 function normalizeIntent(input: DrawingTitleLeaseIntent): DrawingTitleLeaseIntent {
   const value = structuredClone(input);
+  // UUID comparisons and storage keys fold case, but CloudKit record names
+  // retain the exact observed spelling used by lookup and conditional writes.
   for (const field of ["noteId", "attachmentId", "folderId"] as const) {
     assert.ok(isNoteId(value[field]), "Invalid lease identity");
-    value[field] = value[field].toUpperCase();
   }
-  assert.ok(new Set([value.noteId, value.attachmentId, value.folderId]).size === 3, "Overlapping lease identities");
+  assert.ok(new Set([value.noteId, value.attachmentId, value.folderId].map(id => id.toUpperCase())).size === 3, "Overlapping lease identities");
   file(value.file);
   hashes(value);
   title(value.targetTitle);
@@ -266,7 +267,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
   await safePaths();
   const name = (noteId: string) => { assert.ok(isNoteId(noteId)); return path.join(directory, sha(JSON.stringify([vault, options.accountDsidSha256, noteId.toUpperCase()])) + ".json"); };
   async function readUnlocked(noteId: string) { await safePaths(); const raw = await safeRead(name(noteId)); if (raw === undefined)
-    return undefined; const entry = JSON.parse(raw) as DrawingTitleLeaseEntry; validEntry(entry); assert.equal(entry.intent.noteId, noteId.toUpperCase(), "Wrong ledger note"); return entry; }
+    return undefined; const entry = JSON.parse(raw) as DrawingTitleLeaseEntry; validEntry(entry); assert.equal(entry.intent.noteId.toUpperCase(), noteId.toUpperCase(), "Wrong ledger note"); return entry; }
   async function storage() {
     await safePaths();
     await privateProbeDirectory(root);
@@ -448,7 +449,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     } = {}) => {
       const intent = normalizeIntent(input);
       return change(intent.noteId, args.expectedRevision, entry => {
-        const binding = (value: DrawingTitleLeaseIntent) => ({ noteId: value.noteId, attachmentId: value.attachmentId, folderId: value.folderId, targetTitle: value.targetTitle, file: value.file, ...Object.fromEntries(digestFields.map(field => [field, value[field]])) });
+        const binding = (value: DrawingTitleLeaseIntent) => ({ noteId: value.noteId.toUpperCase(), attachmentId: value.attachmentId.toUpperCase(), folderId: value.folderId.toUpperCase(), targetTitle: value.targetTitle, file: value.file, ...Object.fromEntries(digestFields.map(field => [field, value[field]])) });
         if (entry && equal(binding(entry.intent), binding(intent)))
           return { entry, changed: false, result: (value: DrawingTitleLeaseEntry) => value };
         assert.ok(!entry?.pending, "Pending title request cannot be replaced");
