@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { clone, create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { applyTextEdit, encodeNoteDocument, noteDocumentRoundTrips, parseNoteDocument } from "./noteDocument.js";
 import { CharIDSchema, StringSchema, SubstringSchema, VectorTimestampSchema, VectorTimestamp_ClockSchema, VectorTimestamp_Clock_ReplicaClockSchema, AttributeRunSchema } from "./gen/topotext_pb.js";
 import { DocumentSchema, VersionSchema } from "./gen/versioned_document_pb.js";
@@ -51,7 +51,10 @@ test("unsorted clock archive translates wire UUID ranks into domain rows and rou
 test("encoder emits sorted UUID ranks for both coordinates and style anchors without mutating domain rows", () => {
   const doc = parseNoteDocument(wrap(archive()));
   doc.runs[1]!.coord.replica = 1; doc.runs[1]!.anchor.replica = 2;
-  const before = structuredClone(doc), encoded = encodeNoteDocument(doc), content = wire(encoded).substring[1]!;
+  // structuredClone discards protobuf message prototypes; Node 20 correctly
+  // distinguishes those objects even before encoding. Preserve schema identity.
+  const before = { ...structuredClone(doc), attributeRuns: doc.attributeRuns.map(run => clone(AttributeRunSchema, run)) };
+  const encoded = encodeNoteDocument(doc), content = wire(encoded).substring[1]!;
   assert.equal(content.charID!.replicaID, 2); assert.equal(content.timestamp!.replicaID, 1);
   assert.deepEqual(doc, before);
 });
