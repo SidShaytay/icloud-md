@@ -394,19 +394,23 @@ A few consequences worth knowing before you pick:
   something `pull` does and never something `push` does.
 - **Scan/drawing-first notes keep their attachments and independent title.**
   `pull` names them from Apple's display title, or `Untitled` if none is usable,
-  rather than from an object-replacement symbol. Renaming one locally or
-  requesting a different `apple-note-title` is refused: changing CloudKit's
-  display metadata alone does not reliably retitle it in native Apple Notes.
-  Rename it in Apple Notes, then pull. Existing attachment-body restrictions
-  still apply; this filename fix does not make those edits writable.
+  rather than from an object-replacement symbol. By default, changing their
+  filename or requesting a different `apple-note-title` is refused: changing
+  CloudKit display metadata once does not reliably refresh native note lists.
+  Private notes containing one drawing can opt in to [ongoing Linux title
+  reconciliation](docs/drawing-title-reconciliation.md) for same-folder filename
+  renames. Future pushes reassert only the Note title when due, preserving its
+  date, document and assets. Keep the periodic Linux workflow running; an offline
+  device may need a later fetch to display the new name. Existing attachment-body
+  restrictions still apply; this does not make drawing edits writable.
   Existing filename-mode vaults reread unchanged records once after upgrading,
   so the next `pull` corrects filenames too, including `--defer-renames`; no
   re-clone is needed. Local body edits and explicit frontmatter title choices
   survive; files you deleted or renamed by hand are left alone. Existing
   in-body vaults keep their stable filenames.
   icloud-md sync runs independently of native devices; a Mac helper is not
-  required. Local attachment-title renames remain unsupported until they can
-  be performed entirely through icloud-md and verified in native Apple Notes.
+  required. Reconciliation is explicit and scoped; other attachment types and
+  shared notes retain the default title-write refusal.
 - **The mode is chosen once.** Switching an existing vault between the two
   shapes isn't supported yet: it would have to rewrite every file in the
   vault, which is a different (and more dangerous) operation than the

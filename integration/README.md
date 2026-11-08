@@ -203,9 +203,26 @@ advanced the cloud version and, after a subsequent native fetch, corrected the
 name. The modification date, compressed document and all five assets were unchanged.
 This supports investigating ongoing Linux reconciliation; it does not prove a
 finite completed rename will work for a device that remains offline until afterward.
-No periodic reassertion service is installed, and unproven workflows are not
-exposed through the shipped CLI. The internal push coordinator remains a research
-seam tested against the offline SDK, not an end-to-end fix.
+The failed causal-revision workflows remain unexposed by the CLI.
+
+The metadata-only ongoing mode is implemented in `drawingTitleReconciliation.ts`
+and its bounded `drawingTitleLedger.ts`, with matching options on ordinary `status`
+and `push`. Initial writes are A/B metadata only; due refreshes contain only
+`Note.TitleEncrypted`. Source and SDK tests cover locking, no early dispatch,
+uncertain outcomes, changed intent, full protected fingerprints and local
+bookkeeping. Native acceptance checks must run two ordinary filename cycles with
+the device closed for the initial writes, then let a later independently scheduled
+Linux push refresh the title. The writer must not read native verification output.
+See the [operating guide](../docs/drawing-title-reconciliation.md).
+
+Two successive ordinary Linux filename cycles passed Mac verification with Notes
+closed during each initial write. Each first native fetch retained the previous
+list name; a later scheduled Linux title-only refresh corrected it. Reopening
+Notes and another normal sync retained the second name. Cloud and native document
+bytes, all five assets, attachment references and note identity stayed unchanged.
+Paired measurements for the second refresh also preserved local Markdown/base
+bytes, mtime and inode. iPhone visual verification is still pending; cloud
+acknowledgements alone do not complete that acceptance check.
 
 The checked experimental caller is `attachmentTitleRunner.ts`, launched through
 `integration/runAttachmentTitleProbe` on Linux. It verifies the unchanged local
