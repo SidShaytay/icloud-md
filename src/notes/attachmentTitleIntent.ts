@@ -27,7 +27,7 @@ export interface LocalIntent {
 function safeRelative(file: string) {
   assert.ok(file && !path.isAbsolute(file) && !file.includes("\\") && !file.split("/").some(part => !part || part === "." || part === ".."), "Unsafe note path");
 }
-export async function readAttachmentTitleIntent(options: { vault: string; file: string; noteId: string; folderId: string }): Promise<LocalIntent> {
+export async function readAttachmentTitleIntent(options: { vault: string; file: string; noteId: string; folderId: string }, mode: { allowTracked?: boolean } = {}): Promise<LocalIntent> {
   const vault = await realpath(options.vault), state = await readCloneState(vault);
   assert.ok(state?.account?.dsid && state.titleMode === "filename", "A bound filename-title vault is required");
   const matches = Object.entries(state.notes).filter(([id]) => sameId(id, options.noteId));
@@ -35,8 +35,8 @@ export async function readAttachmentTitleIntent(options: { vault: string; file: 
   const [noteId, entry] = matches[0]!;
   assert.ok(entry.folderRecordName && sameId(entry.folderRecordName, options.folderId) && !entry.sharedZoneOwner && !entry.pendingRename && entry.frontmatterTitle === undefined, "Unsupported note state/folder");
   safeRelative(options.file); safeRelative(entry.file);
-  assert.ok(options.file.endsWith(".md") && options.file !== entry.file && path.posix.dirname(options.file) === path.posix.dirname(entry.file), "Only a same-folder filename rename qualifies");
-  assert.ok(await absent(path.join(vault, entry.file)), "Original note path reappeared; rename is ambiguous");
+  assert.ok(options.file.endsWith(".md") && (mode.allowTracked || options.file !== entry.file) && path.posix.dirname(options.file) === path.posix.dirname(entry.file), "Only a same-folder filename rename qualifies");
+  if (options.file !== entry.file) assert.ok(await absent(path.join(vault, entry.file)), "Original note path reappeared; rename is ambiguous");
   let current = vault;
   for (const part of options.file.split("/")) { current = path.join(current, part); const stat = await lstat(current); assert.ok(!stat.isSymbolicLink(), "Symlink in note path"); }
   assert.ok((await lstat(current)).isFile() && !outside(vault, await realpath(current)), "Note path leaves vault");
