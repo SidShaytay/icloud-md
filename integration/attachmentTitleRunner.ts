@@ -1,5 +1,6 @@
 /** Checked Linux-only caller for a separately approved title experiment.
  * Never settles the filename/index or treats cloud success as native proof. */
+import { readAttachmentTitleIntent, readAttachmentTitleFolders, type LocalIntent } from "../src/notes/attachmentTitleIntent.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
@@ -8,15 +9,10 @@ import { fileURLToPath } from "node:url";
 import type { CloudKitRecord } from "../src/cloudkit/databaseClient.js";
 import { isEnoent } from "../src/fsUtil.js";
 import { readBaseCopy } from "../src/notes/baseCopy.js";
-import { readCloneState, type CloneStateFolderEntry } from "../src/notes/cloneState.js";
+import { readCloneState } from "../src/notes/cloneState.js";
 import { classifyNoteRecord } from "../src/notes/decodeNoteRecord.js";
-import { decodeFolderRecord } from "../src/notes/folderTree.js";
-import { readLocalNote } from "../src/notes/localFileState.js";
 import { renderPlaceholders } from "../src/notes/noteAttachments.js";
-import { isNoteId, readNoteId, readNoteTitleKey } from "../src/notes/noteIdFrontmatter.js";
-import { titleFromNoteFileName } from "../src/notes/noteTitleParagraph.js";
-import { titleIsRepresentable } from "../src/notes/titleFilename.js";
-import { indexUntrackedNoteIds } from "../src/notes/untrackedFiles.js";
+import { isNoteId } from "../src/notes/noteIdFrontmatter.js";
 import { formatEmbedMarker } from "../src/notes/unknownContent.js";
 import { assertAttachmentTitleLockHeld } from "./attachmentTitleLock.js";
 import { createAttachmentTitleProbeIO, runAttachmentTitleProbe, type TitleProbeIO, type TitleProbeRequest, type TitleProbePhase } from "./attachmentTitleProbe.js";
@@ -69,11 +65,6 @@ const defaults: TitleRunnerPorts = {
   now: Date.now, codeIdentity,
 };
 
-interface LocalIntent {
-  vault: string; file: string; previousFile: string; targetTitle: string; noteId: string;
-  fileSha256: string; baseSha256: string; stateSha256: string; accountDsidSha256: string;
-  folders: Array<{ id: string; parent?: string }>;
-}
 interface SavedBaseline { version: 1; local: LocalIntent; scope: TitleProbeRequest["scope"]; capture: DrawingCapture; folders: CloudKitRecord[]; codeSha256: string; lockAuthority: Awaited<ReturnType<TitleRunnerPorts["lockAuthority"]>>; }
 interface RunnerResult {
   status: "preview" | "cloud-applied-native-unverified" | "ambiguous";
@@ -82,57 +73,6 @@ interface RunnerResult {
   documentRevision?: DocumentRevisionSummary;
 }
 async function absent(file: string) { try { await lstat(file); return false; } catch (error) { if (isEnoent(error)) return true; throw error; } }
-function safeRelative(file: string) {
-  assert.ok(file && !path.isAbsolute(file) && !file.includes("\\") && !file.split("/").some(part => !part || part === "." || part === ".."), "Unsafe note path");
-}
-async function localIntent(options: TitleRunnerOptions): Promise<LocalIntent> {
-  const vault = await realpath(options.vault), state = await readCloneState(vault);
-  assert.ok(state?.account?.dsid && state.titleMode === "filename", "A bound filename-title vault is required");
-  const matches = Object.entries(state.notes).filter(([id]) => sameId(id, options.noteId));
-  assert.ok(matches.length === 1, "Ambiguous tracked note identity");
-  const [noteId, entry] = matches[0]!;
-  assert.ok(entry.folderRecordName && sameId(entry.folderRecordName, options.folderId) && !entry.sharedZoneOwner && !entry.pendingRename && entry.frontmatterTitle === undefined, "Unsupported note state/folder");
-  safeRelative(options.file); safeRelative(entry.file);
-  assert.ok(options.file.endsWith(".md") && options.file !== entry.file && path.posix.dirname(options.file) === path.posix.dirname(entry.file), "Only a same-folder filename rename qualifies");
-  assert.ok(await absent(path.join(vault, entry.file)), "Original note path reappeared; rename is ambiguous");
-  let current = vault;
-  for (const part of options.file.split("/")) { current = path.join(current, part); const stat = await lstat(current); assert.ok(!stat.isSymbolicLink(), "Symlink in note path"); }
-  assert.ok((await lstat(current)).isFile() && !outside(vault, await realpath(current)), "Note path leaves vault");
-  const index = await indexUntrackedNoteIds(vault, {}, "filename");
-  const claims = [...index.claims].filter(([id]) => sameId(id, noteId)).flatMap(([, files]) => files);
-  assert.ok(index.unreadable.length === 0 && claims.length === 1 && claims[0] === options.file, "Ambiguous local note identity claims");
-  const local = await readLocalNote(vault, { ...entry, file: options.file }, noteId, "filename");
-  assert.ok(local.status === "clean" && readNoteId(local.frontmatter)?.toUpperCase() === noteId.toUpperCase() && readNoteTitleKey(local.frontmatter).kind === "absent", "Local drawing body/identity/title changed");
-  const targetTitle = titleFromNoteFileName(options.file);
-  assert.ok(targetTitle && titleIsRepresentable(targetTitle) && !/[\r\n\0]/.test(targetTitle), "Unsupported target title");
-  const folders: LocalIntent["folders"] = [], definitions: CloneStateFolderEntry[] = [];
-  let folder: string | undefined = entry.folderRecordName;
-  while (folder) {
-    assert.ok(folders.length < 32 && !folders.some(item => sameId(item.id, folder!)), "Invalid folder ancestry");
-    const definition: CloneStateFolderEntry | undefined = state.folders?.[folder];
-    assert.ok(definition && !definition.sharedZoneOwner, "Folder is not known private");
-    safeRelative(definition.dirName);
-    folders.push({ id: folder, ...(definition.parentRecordName ? { parent: definition.parentRecordName } : {}) });
-    definitions.push(definition); folder = definition.parentRecordName;
-  }
-  assert.ok(definitions.reverse().map(item => item.dirName).join("/") === path.posix.dirname(entry.file), "Local folder path does not match state");
-  const base = await readBaseCopy(vault, noteId); assert.ok(base !== undefined, "Missing local base copy");
-  return { vault, file: options.file, previousFile: entry.file, targetTitle, noteId,
-    fileSha256: sha(await readFile(current)), baseSha256: sha(base), stateSha256: sha(json({ account: state.account, entry, folders, definitions, titleMode: state.titleMode })), accountDsidSha256: sha(state.account.dsid), folders };
-}
-async function folderSnapshot(local: LocalIntent, io: TitleProbeIO) {
-  const records = await io.lookup(local.folders.map(folder => folder.id));
-  assert.ok(records.length === local.folders.length, "Missing cloud folder");
-  for (const folder of local.folders) {
-    const record = records.find(item => sameId(item.recordName, folder.id));
-    const decoded = record && decodeFolderRecord(record);
-    // Native top-level Folder captures may carry only TitleEncrypted. An
-    // explicit deletion field must still be a valid undeleted INT64.
-    const deletion = record?.fields.Deleted;
-    assert.ok(record && decoded && record.recordChangeTag && record.deleted !== true && (deletion === undefined || (deletion.type === "INT64" && deletion.value === 0)) && !record.shareRecordName && decoded.parentRecordName === folder.parent, "Shared/private folder ancestry changed");
-  }
-  return records.sort((a, b) => a.recordName.localeCompare(b.recordName));
-}
 function preserved(capture: DrawingCapture) { return { documentSha256: capture.documentSha256, assets: capture.assets }; }
 function versions(capture: DrawingCapture) { return capture.records.map(record => ({ id: record.recordName, tag: record.recordChangeTag })); }
 
@@ -144,7 +84,7 @@ export async function runAttachmentTitleRunner(input: TitleRunnerOptions, overri
   if (options.apply) { assert.ok(options.expectedPlanSha256 && /^[a-f0-9]{64}$/.test(options.expectedPlanSha256), "Apply requires an approved preview plan"); await ports.assertLock(); }
   checkDeadline();
   const lockAuthority = await ports.lockAuthority();
-  const local = await localIntent(options), codeSha256 = await ports.codeIdentity!();
+  const local = await readAttachmentTitleIntent(options), codeSha256 = await ports.codeIdentity!();
   const journal = path.resolve(options.journalDirectory);
   // Resolve the nearest existing ancestor, including symlinked parent paths.
   let ancestor = journal;
@@ -171,11 +111,11 @@ export async function runAttachmentTitleRunner(input: TitleRunnerOptions, overri
   }
   const io = await ports.connect(local.vault);
   assert.ok(io.accountDsidSha256 === local.accountDsidSha256, "Wrong cloud account");
-  const folders = await folderSnapshot(local, io);
+  const folders = await readAttachmentTitleFolders(local, io);
   if (saved) equal(saved.folders, folders, "Cloud folder ancestry changed");
   const scope = { noteId: local.noteId, attachmentId: options.attachmentId, folderId: options.folderId, accountDsidSha256: local.accountDsidSha256 };
   const before = await ports.capture(scope, io.lookup);
-  checkDeadline(); equal(await localIntent(options), local, "Local intent changed during capture");
+  checkDeadline(); equal(await readAttachmentTitleIntent(options), local, "Local intent changed during capture");
   const note = before.records.find(record => sameId(record.recordName, local.noteId));
   const decoded = note && classifyNoteRecord(note, { titleMode: "filename" });
   assert.ok(decoded?.status === "ok" && decoded.attachments.length === 1 && sameId(decoded.attachments[0]!.attachmentIdentifier, options.attachmentId), "Unsupported cloud drawing");
@@ -206,12 +146,12 @@ export async function runAttachmentTitleRunner(input: TitleRunnerOptions, overri
     const beforeDispatch = async () => {
       await ports.assertLock(); checkDeadline();
       assert.ok(await ports.codeIdentity!() === codeSha256, "Executable code changed before dispatch");
-      equal(await folderSnapshot(local, io), folders, "Private folder scope changed before dispatch");
+      equal(await readAttachmentTitleFolders(local, io), folders, "Private folder scope changed before dispatch");
       equal(await ports.lockAuthority(), lockAuthority, "Sync lock authority changed before dispatch");
-      equal(await localIntent(options), local, "Local intent changed before dispatch");
+      equal(await readAttachmentTitleIntent(options), local, "Local intent changed before dispatch");
       checkDeadline();
     };
-    const afterDispatch = async () => equal(await localIntent(options), local, "Local intent changed after dispatch");
+    const afterDispatch = async () => equal(await readAttachmentTitleIntent(options), local, "Local intent changed after dispatch");
     const checkedIO: TitleProbeIO = { ...io,
       update: async update => { await beforeDispatch(); await io.update(update); await afterDispatch(); },
       updateBatch: async updates => { await beforeDispatch(); await io.updateBatch(updates); await afterDispatch(); },
@@ -221,7 +161,7 @@ export async function runAttachmentTitleRunner(input: TitleRunnerOptions, overri
     const after = await ports.capture(scope, io.lookup, { directory: path.join(journal, `after-${options.phase}`) });
     const expectedData = { ...preserved(baseline.capture), ...(documentRevision ? { documentSha256: documentRevision.documentSha256 } : {}) };
     equal(preserved(after), expectedData, "Post-dispatch document revision/drawing bytes or references changed");
-    equal(await localIntent(options), local, "Local intent changed after capture");
+    equal(await readAttachmentTitleIntent(options), local, "Local intent changed after capture");
     const complete = { ...result, status: "cloud-applied-native-unverified" as const, captureSha256: sha(json(after)) };
     await createProbeJournal(resultFile, json(complete));
     return complete;
