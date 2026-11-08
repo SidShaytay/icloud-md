@@ -13,9 +13,10 @@ import { isNoteId } from "../src/notes/noteIdFrontmatter.js";
 import { titleIsRepresentable } from "../src/notes/titleFilename.js";
 import type { HarnessAccount } from "./harnessAccount.js";
 import { createProbeJournal, privateProbeDirectory, readProbeJournal } from "./attachmentTitleProbeJournal.js";
+import { buildAttachmentTitleRevision, type DocumentRevisionSummary } from "./attachmentTitleRevision.js";
 
 interface ProbeScope { noteId: string; attachmentId: string; folderId: string; accountDsidSha256: string; }
-export type TitleProbePhase = "A" | "B" | "BA";
+export type TitleProbePhase = "A" | "B" | "BA" | "BD";
 export interface TitleProbeRequest {
   scope: ProbeScope;
   /** Original snapshots before either phase; keep the same baseline for B. */
@@ -38,6 +39,7 @@ interface ProbeResult {
   phase: TitleProbePhase;
   operationId: string;
   fields: string[];
+  documentRevision?: DocumentRevisionSummary;
 }
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 const sameId = (a: unknown, b: string) => typeof a === "string" && a.toUpperCase() === b.toUpperCase();
@@ -86,7 +88,7 @@ function tags(records: CloudKitRecord[]) {
 export async function runAttachmentTitleProbe(request: TitleProbeRequest, options: { apply?: boolean } = {}, io?: TitleProbeIO): Promise<ProbeResult> {
   // Detach caller objects before any await; later mutation cannot change intent.
   const r = structuredClone(request);
-  assert.ok(r.phase === "A" || r.phase === "B" || r.phase === "BA", "Invalid probe phase");
+  assert.ok(r.phase === "A" || r.phase === "B" || r.phase === "BA" || r.phase === "BD", "Invalid probe phase");
   assert.ok(r.targetTitle && titleIsRepresentable(r.targetTitle) && !/[\r\n\0]/.test(r.targetTitle), "Unsupported filename title");
   assert.ok(Number.isSafeInteger(r.modificationDate) && r.modificationDate > 0 && path.isAbsolute(r.journalDirectory), "Invalid probe journal/date");
   const baseline = checkedScope(r.baseline, r.scope), expected = checkedScope(r.expected, r.scope);
@@ -95,12 +97,16 @@ export async function runAttachmentTitleProbe(request: TitleProbeRequest, option
   assert.ok(typeof title(baseline.note, "TitleEncrypted") === "string" && title(baseline.note, "TitleEncrypted") !== encoded, "Baseline already has this note title");
   if (r.phase === "A") assert.ok(snapshot(r.baseline) === snapshot(r.expected), "Phase A baseline changed");
   else assert.ok(title(expected.attachment, "UserTitle") === encoded && title(expected.note, "TitleEncrypted") === title(baseline.note, "TitleEncrypted"), "Terminal phase title baseline changed");
+  const operationId = sha256(JSON.stringify([stable(r.scope), snapshot(r.baseline), r.targetTitle]));
+  const document = expected.note.fields.TextDataEncrypted;
+  assert.ok(r.phase !== "BD" || (document?.type === "ENCRYPTED_BYTES" && typeof document.value === "string" && Buffer.from(document.value, "base64").toString("base64") === document.value), "Unsupported original document encoding");
+  const revision = r.phase === "BD" ? buildAttachmentTitleRevision(Buffer.from(document!.value as string, "base64"), operationId) : undefined;
   const record = r.phase === "A" ? expected.attachment : expected.note;
   const update: RecordUpdate = { recordName: record.recordName, recordType: record.recordType, recordChangeTag: record.recordChangeTag!, parentRecordName: record.parentRecordName,
     fields: r.phase === "A" ? { UserTitle: { value: encoded } } : { TitleEncrypted: { value: encoded }, ModificationDate: { value: r.modificationDate } } };
+  if (revision) update.fields.TextDataEncrypted = { value: revision.compressed.toString("base64") };
   const updates = r.phase === "BA" ? [update, { recordName: expected.attachment.recordName, recordType: "Attachment", recordChangeTag: expected.attachment.recordChangeTag!, parentRecordName: expected.attachment.parentRecordName, fields: { UserTitle: { value: encoded } } }] : [update];
-  const operationId = sha256(JSON.stringify([stable(r.scope), snapshot(r.baseline), r.targetTitle]));
-  const base = { phase: r.phase, operationId, fields: r.phase === "BA" ? updates.flatMap(item => Object.keys(item.fields).map(key => `${item.recordType}.${key}`)) : Object.keys(update.fields) };
+  const base = { phase: r.phase, operationId, fields: r.phase === "BA" ? updates.flatMap(item => Object.keys(item.fields).map(key => `${item.recordType}.${key}`)) : Object.keys(update.fields), ...(revision ? { documentRevision: revision.summary } : {}) };
   if (options.apply !== true) return { ...base, status: "preview" };
   assert.ok(io && io.accountDsidSha256 === r.scope.accountDsidSha256, "Wrong probe account");
   const directory = path.join(r.journalDirectory, operationId);
@@ -113,11 +119,11 @@ export async function runAttachmentTitleProbe(request: TitleProbeRequest, option
     return { ...base, status: matches ? "already-recorded-native-unverified" : "ambiguous" };
   }
   if (r.phase !== "A") {
-    const alternate = r.phase === "B" ? "BA" : "B";
     const terminal = await readProbeJournal(path.join(directory, "terminal.intent.json"));
     // A crash may leave the shared claim without its phase-specific marker.
     if (terminal === identity) return { ...base, status: "ambiguous" };
-    assert.ok(terminal === undefined && await readProbeJournal(path.join(directory, `${alternate}.intent.json`)) === undefined && await readProbeJournal(path.join(directory, `${alternate}.ack.json`)) === undefined, "Another terminal phase exists; never retry through an alternate");
+    assert.ok(terminal === undefined, "Another terminal phase exists; never retry through an alternate");
+    for (const alternate of ["B", "BA", "BD"]) if (alternate !== r.phase) assert.ok(await readProbeJournal(path.join(directory, `${alternate}.intent.json`)) === undefined && await readProbeJournal(path.join(directory, `${alternate}.ack.json`)) === undefined, "Another terminal phase exists; never retry through an alternate");
     const a = await readProbeJournal(path.join(directory, "A.ack.json"));
     const aIntent = await readProbeJournal(path.join(directory, "A.intent.json"));
     assert.ok(a && aIntent, "Phase B requires this operation's A acknowledgement");
@@ -142,7 +148,12 @@ export async function runAttachmentTitleProbe(request: TitleProbeRequest, option
     if (r.phase === "BA") await io.updateBatch(updates); else await io.update(update);
     const after = await io.lookup([r.scope.noteId, r.scope.attachmentId]);
     const checked = checkedScope(after, r.scope);
-    assert.ok(snapshot(after, true) === snapshot(r.baseline, true), "Post-write preservation failure");
+    let protectedAfter = after;
+    if (revision) {
+      assert.ok(checked.note.fields.TextDataEncrypted?.type === "ENCRYPTED_BYTES" && checked.note.fields.TextDataEncrypted.value === revision.compressed.toString("base64"), "Exact computed document revision was not observed");
+      protectedAfter = after.map(item => item === checked.note ? { ...item, fields: { ...item.fields, TextDataEncrypted: baseline.note.fields.TextDataEncrypted! } } : item);
+    }
+    assert.ok(snapshot(protectedAfter, true) === snapshot(r.baseline, true), "Post-write preservation failure");
     if (r.phase === "BA") {
       assert.ok(checked.attachment.recordChangeTag !== expected.attachment.recordChangeTag && checked.attachment.fields.UserTitle?.type === "ENCRYPTED_BYTES" && title(checked.attachment, "UserTitle") === encoded, "Batch attachment event not observed");
     } else {
