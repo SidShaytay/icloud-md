@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { openSync, closeSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, lstat } from "node:fs/promises";
+import { writeCloneState } from "./notes/cloneState.js";
 import { tmpdir } from "node:os";
 import { readOwnPackageVersion } from "./version.js";
 
@@ -105,4 +107,47 @@ test("install-browser is a listed command", async () => {
 test("unverified drawing-title workflows are not exposed by the CLI", async () => {
   const { stdout } = await runCli(["push", "--help"]);
   assert.doesNotMatch(stdout, /--experimental-drawing-titles/);
+});
+
+const drawingScopeId = "12345678-1234-4234-8234-123456789abc";
+test("drawing reconciliation and repeatable scope flags belong to both status and push", async () => {
+  for (const command of ["status", "push"]) {
+    const { stdout } = await runCli([command, "--help"]);
+    assert.match(stdout, /--reconcile-drawing-titles <private-dir>/);
+    assert.match(stdout, /--drawing-title-folder <uuid>/);
+    assert.match(stdout, /--drawing-title-note <uuid>/);
+    assert.match(stdout, /later sync runs|periodic/i);
+  }
+});
+test("drawing scope flags require explicit reconciliation before a command or connection runs", async () => {
+  for (const command of ["status", "push"]) for (const flag of ["--drawing-title-folder", "--drawing-title-note"]) {
+    await assert.rejects(runCli([command, "/nonexistent", flag, drawingScopeId]), failsUsageWith(/require.*--reconcile-drawing-titles/i));
+  }
+});
+test("malformed drawing scope UUIDs fail before a command or connection runs", async () => {
+  for (const command of ["status", "push"]) for (const flag of ["--drawing-title-folder", "--drawing-title-note"]) {
+    await assert.rejects(runCli([command, "/nonexistent", "--reconcile-drawing-titles", "./private-evidence", flag, "not-a-uuid"]), failsUsageWith(/UUID/i));
+  }
+});
+
+function failsUsageWith(pattern: RegExp): (error: unknown) => boolean {
+  return (error: unknown) => {
+    const { code, stderr } = error as { code: number; stderr: string };
+    assert.equal(code, 2); assert.match(stderr, pattern); return true;
+  };
+}
+
+test("both commands accept repeated scopes and resolve a relative reconciliation directory without writing it", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "cli-title-forward-")), vault = path.join(root, "vault"), journalDirectory = path.join(root, "private-evidence");
+  await writeCloneState(vault, { titleMode: "filename", account: { appleId: "fixture@example.invalid", dsid: "cli-fixture" }, syncToken: "", notes: {} });
+  const lockPath = path.join(root, "sync.lock"), fd = openSync(lockPath, "a", 0o600);
+  assert.equal(spawnSync("flock", ["-n", "3"], { stdio: ["ignore", "ignore", "pipe", fd] }).status, 0);
+  try {
+    for (const command of ["status", "push"]) {
+      const args = ["--import", "tsx", cliPath, "--json", command, vault, "--reconcile-drawing-titles", path.relative(packageRoot, journalDirectory), "--drawing-title-folder", drawingScopeId, "--drawing-title-folder", drawingScopeId.toUpperCase(), "--drawing-title-note", drawingScopeId, "--drawing-title-note", "11111111-1111-4111-8111-111111111111", ...(command === "push" ? ["--dry-run"] : [])];
+      const result = spawnSync(process.execPath, args, { cwd: packageRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe", fd], env: { ...process.env, HOME: root, ICLOUD_MD_BROWSER_EXECUTABLE: process.execPath, ICLOUD_MD_PROBE_LOCK_PATH: lockPath, ICLOUD_MD_PROBE_LOCK_FD: "3" } });
+      assert.equal(result.status, 0, result.stderr); assert.deepEqual(JSON.parse(result.stdout).entries, []);
+      await assert.rejects(lstat(journalDirectory), { code: "ENOENT" });
+    }
+  } finally { closeSync(fd); await rm(root, { recursive: true, force: true }); }
 });
