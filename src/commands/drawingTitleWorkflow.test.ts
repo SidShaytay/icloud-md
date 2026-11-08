@@ -14,8 +14,8 @@ const previousHome = process.env.HOME;
 process.env.HOME = home;
 const { create } = await import("@bufbuild/protobuf");
 const { AttachmentInfoSchema } = await import("../notes/gen/topotext_pb.js");
-const { buildInitialNoteDocument, encodeNoteDocument } = await import("../notes/noteDocument.js");
-const { compressNoteDocument } = await import("../notes/noteText.js");
+const { buildInitialNoteDocument, encodeNoteDocument, parseNoteDocument } = await import("../notes/noteDocument.js");
+const { compressNoteDocument, decompressNoteDocument } = await import("../notes/noteText.js");
 const { classifyNoteRecord } = await import("../notes/decodeNoteRecord.js");
 const { formatEmbedMarker } = await import("../notes/unknownContent.js");
 const { writeCloneState, readCloneState } = await import("../notes/cloneState.js");
@@ -64,7 +64,7 @@ test("experimental ordinary push supports two successive drawing filenames witho
       UTI: { type: "STRING", value: "com.apple.paper" }, Deleted: { type: "INT64", value: 0 }, Note: { type: "REFERENCE", value: { recordName: noteId } }, UserTitle: { type: "ENCRYPTED_BYTES", value: Buffer.from("Original drawing").toString("base64") },
       PaperDatabase: { type: "ASSETID", value: { downloadURL: "https://cvws.icloud-content.com/fixture", size: 3, fileChecksum: "pixels", referenceChecksum: "reference", wrappingKey: "key" } },
     } };
-    const modifications: string[][] = [];
+    const modifications: string[][] = [], documents: string[] = [];
     const classified = classifyNoteRecord(record, { titleMode: "filename" });
     assert.equal(classified.status, "ok");
     if (classified.status !== "ok") return;
@@ -111,6 +111,7 @@ test("experimental ordinary push supports two successive drawing filenames witho
         const current = update.recordName === noteId ? record : drawing;
         assert.equal(update.recordChangeTag, current.recordChangeTag);
         modifications.push(Object.keys(update.fields));
+        if (update.fields.TextDataEncrypted) documents.push(update.fields.TextDataEncrypted.value);
         for (const [key, field] of Object.entries(update.fields)) current.fields[key] = { ...(field as { value: unknown }), type: key === "ModificationDate" ? "TIMESTAMP" : "ENCRYPTED_BYTES" };
         current.recordChangeTag += "+";
         return Response.json({ records: [rawRecord(current)] });
@@ -131,6 +132,13 @@ test("experimental ordinary push supports two successive drawing filenames witho
       const second = await runPush(vault, options);
       assert.equal(second.pushed, 1); assert.equal(modifications.length, 4);
       assert.deepEqual(modifications, [["UserTitle"], ["TitleEncrypted", "ModificationDate", "TextDataEncrypted"], ["UserTitle"], ["TitleEncrypted", "ModificationDate", "TextDataEncrypted"]]);
+      for (const body of documents) {
+        const doc = parseNoteDocument(decompressNoteDocument(Buffer.from(body, "base64")));
+        const original = doc.runs.find(run => run.coord.replica === 1 && run.coord.clock === 0)!;
+        assert.equal(original.tombstone, true, "the original physical drawing must be replaced, not accompanied by unrelated dead history");
+        assert.equal(doc.runs.filter(run => run.length && !run.tombstone).length, 1);
+        assert.equal(doc.attributeRuns[0]!.attachmentInfo!.attachmentIdentifier, attachmentId);
+      }
       assert.equal((await readCloneState(vault))?.notes[noteId]?.file, nextFile);
       assert.equal((await readCloneState(vault))?.notes[noteId]?.recordChangeTag, record.recordChangeTag);
       assert.equal((await runPush(vault, options)).pushed, 0);

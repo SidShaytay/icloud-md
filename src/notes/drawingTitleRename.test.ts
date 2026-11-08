@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { create } from "@bufbuild/protobuf";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, lstat, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -14,7 +14,9 @@ import { composeNoteFile } from "./noteIdFrontmatter.js";
 import { compressNoteDocument } from "./noteText.js";
 import { formatEmbedMarker } from "./unknownContent.js";
 import { probeJournalDurability } from "./attachmentTitleProbeJournal.js";
-import type { TitleProbeIO } from "./attachmentTitleProbe.js";
+import { runAttachmentTitleProbe, type TitleProbeIO } from "./attachmentTitleProbe.js";
+import { readAttachmentTitleIntent, readAttachmentTitleFolders } from "./attachmentTitleIntent.js";
+import { createProbeJournal, privateProbeDirectory } from "./attachmentTitleProbeJournal.js";
 import { prepareDrawingTitleRename, type DrawingTitleRenameOptions, type DrawingTitleRenamePorts } from "./drawingTitleRename.js";
 const noteId = "AAAA1111-1111-4111-8111-111111111111";
 const attachmentId = "BBBB2222-2222-4222-8222-222222222222";
@@ -69,10 +71,10 @@ async function setup() {
   return { root, vault, body, file, local, state, cloud, options: { ...options, baseline: structuredClone(cloud.slice(0, 2)), expectedNoteTag: cloud[0]!.recordChangeTag!, io }, writes, batches, captures, ports, io, expire: () => { now = 20_000; } };
 }
 
-test("drawing rename preview is read-only; execution captures assets and sends only A then BD", () => fixture(async f => {
+test("drawing rename preview is read-only; execution captures assets and sends only A then BR", () => fixture(async f => {
   const plan = await prepareDrawingTitleRename(f.options, f.ports);
   assert.equal(f.writes.length, 0); assert.equal(f.captures.length, 0);
-  assert.equal(plan.documentRevision.strategy, "trailing-tombstone-v1");
+  assert.equal(plan.documentRevision.strategy, "replace-drawing-v1");
   const result = await plan.execute();
   assert.equal(result.status, "cloud-applied-native-unverified");
   assert.deepEqual(f.writes.map(w => Object.keys(w.fields)), [["UserTitle"], ["TitleEncrypted", "ModificationDate", "TextDataEncrypted"]]);
@@ -124,7 +126,7 @@ test("postwrite asset drift never produces a completed attempt", () => fixture(a
   assert.equal((await retry.execute()).status, "ambiguous"); assert.equal(f.writes.length, 2);
 }));
 
-for (const mutation of ["note-title", "drawing-title", "protected-field"] as const) test(`foreign ${mutation} after BD acknowledgement blocks completion`, () => fixture(async f => {
+for (const mutation of ["note-title", "drawing-title", "protected-field"] as const) test(`foreign ${mutation} after BR acknowledgement blocks completion`, () => fixture(async f => {
   const capture = f.ports.capture;
   const plan = await prepareDrawingTitleRename(f.options, { ...f.ports, capture: async (...args) => {
     if (f.writes.length === 2) {
@@ -144,4 +146,44 @@ test("recreating the evidence directory cannot erase an uncertain attempt", () =
   await mkdir(f.options.journalDirectory, { mode: 0o700 });
   const retry = await prepareDrawingTitleRename(f.options, f.ports);
   assert.equal((await retry.execute()).status, "ambiguous"); assert.equal(f.writes.length, 0);
+}));
+
+async function legacyBD(f: Awaited<ReturnType<typeof setup>>) {
+  const local = await readAttachmentTitleIntent(f.options), folders = await readAttachmentTitleFolders(local, f.io), lock = await f.ports.lockAuthority();
+  const scope = { noteId, attachmentId, folderId, accountDsidSha256: f.io.accountDsidSha256 }, baseline = structuredClone(f.options.baseline), modificationDate = f.ports.now();
+  await privateProbeDirectory(f.options.journalDirectory);
+  const stat = await lstat(f.options.journalDirectory, { bigint: true });
+  await createProbeJournal(path.join(f.vault, ".icloud-md", "attachment-title-journal.json"), JSON.stringify({ accountDsidSha256: scope.accountDsidSha256, dev: stat.dev.toString(), directory: f.options.journalDirectory, ino: stat.ino.toString() }));
+  const directory = path.join(f.options.journalDirectory, sha(JSON.stringify([local.vault, scope.accountDsidSha256, noteId.toUpperCase()])), "attempt-00000001");
+  await privateProbeDirectory(directory);
+  const request = { scope, baseline, targetTitle: local.targetTitle, modificationDate, journalDirectory: path.join(directory, "phases") };
+  const before = await f.ports.capture(scope, f.io.lookup, { directory: path.join(directory, "before-A") });
+  assert.equal((await runAttachmentTitleProbe({ ...request, expected: before.records, phase: "A" }, { apply: true }, f.io)).status, "cloud-applied-native-unverified");
+  await f.ports.capture(scope, f.io.lookup, { directory: path.join(directory, "after-A") });
+  const expected = await f.ports.capture(scope, f.io.lookup, { directory: path.join(directory, "before-BD") });
+  const preview = await runAttachmentTitleProbe({ ...request, expected: expected.records, phase: "BD" });
+  const begin = JSON.stringify({ local, scope, lock, folders, baseline, documentRevision: preview.documentRevision, modificationDate });
+  await createProbeJournal(path.join(directory, "begin.json"), begin);
+  const completed = await runAttachmentTitleProbe({ ...request, expected: expected.records, phase: "BD" }, { apply: true }, f.io);
+  assert.equal(completed.status, "cloud-applied-native-unverified");
+  await f.ports.capture(scope, f.io.lookup, { directory: path.join(directory, "after-BD") });
+  const raw = await readFile(path.join(directory, "after-BD", "complete.json"), "utf8");
+  await createProbeJournal(path.join(directory, "complete.json"), JSON.stringify({ identitySha256: sha(begin), captureSha256: sha(raw), documentRevision: preview.documentRevision, operationId: completed.operationId }));
+  return directory;
+}
+test("completed legacy BD is recovered read-only without converting it into a BR retry", () => fixture(async f => {
+  await legacyBD(f);
+  const plan = await prepareDrawingTitleRename({ ...f.options, baseline: structuredClone(f.cloud.slice(0, 2)) }, f.ports);
+  const result = await plan.execute(); assert.equal(result.status, "cloud-applied-native-unverified");
+  if (result.status === "cloud-applied-native-unverified") assert.equal(result.documentRevision.strategy, "trailing-tombstone-v1");
+  assert.equal(f.writes.length, 2); assert.equal(f.captures.length, 4);
+}));
+test("an unknown completed strategy is refused even when completion and capture hashes agree", () => fixture(async f => {
+  const directory = await legacyBD(f), beginPath = path.join(directory, "begin.json"), completedPath = path.join(directory, "complete.json");
+  const begin = JSON.parse(await readFile(beginPath, "utf8")), completion = JSON.parse(await readFile(completedPath, "utf8"));
+  begin.documentRevision.strategy = "unknown"; completion.documentRevision.strategy = "unknown";
+  const raw = JSON.stringify(begin); completion.identitySha256 = sha(raw);
+  await writeFile(beginPath, raw); await writeFile(completedPath, JSON.stringify(completion));
+  await assert.rejects(prepareDrawingTitleRename({ ...f.options, baseline: structuredClone(f.cloud.slice(0, 2)) }, f.ports), /unknown.*strategy/i);
+  assert.equal(f.writes.length, 2);
 }));

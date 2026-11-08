@@ -937,7 +937,7 @@ export async function buildPushPlan(
           attachmentId, folderId: pair.folderRecordName, journalDirectory: options.attachmentTitleRenames.journalDirectory,
           baseline, expectedNoteTag: pair.entry.recordChangeTag, io });
         entries.push({ ...base, resolution: "ready",
-          remark: "experimental drawing retitle; preserves visible content and assets, adds one deleted CRDT character",
+          remark: "experimental drawing retitle; preserves visible content, formatting and assets; replaces the physical drawing character",
           execute: async () => {
             const outcome = await plan.execute();
             if (outcome.status === "ambiguous") return { succeeded: false, message: `${pair.toFile}: drawing retitle outcome is uncertain; journal retained and automatic retry blocked` };

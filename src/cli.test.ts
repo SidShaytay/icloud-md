@@ -106,4 +106,5 @@ test("drawing title renames require an explicit experimental private-journal opt
   const { stdout } = await runCli(["push", "--help"]);
   assert.match(stdout, /--experimental-drawing-titles <directory>/);
   assert.match(stdout, /causal|CRDT/);
+  assert.match(stdout, /physical/);
 });

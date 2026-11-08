@@ -369,7 +369,7 @@ program
       'places. Run "status" first to see exactly what push will do, including anything it would refuse.',
   )
   .option("--dry-run", "report what would be pushed without changing anything")
-  .option("--experimental-drawing-titles <directory>", "opt in to guarded drawing retitles with a causal CRDT revision; save evidence in this private directory outside the vault")
+  .option("--experimental-drawing-titles <directory>", "opt in to drawing retitles by replacing the physical CRDT character with the same attachment and formatting; save private evidence outside the vault")
   .action(async (directory: string | undefined, opts: { dryRun?: boolean; experimentalDrawingTitles?: string }, command: Command) => {
     const context = contextFor(command);
     const targetDir = await resolveTargetDir(directory);

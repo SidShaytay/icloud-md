@@ -39,6 +39,11 @@ async function safeJournal(directory: string, vault: string) {
   }
 }
 interface Complete { identitySha256: string; captureSha256: string; documentRevision: DocumentRevisionSummary; operationId: string; }
+type TerminalPhase = "BD" | "BR";
+function terminalPhase(revision: DocumentRevisionSummary): TerminalPhase {
+  assert.ok(revision && (revision.strategy === "trailing-tombstone-v1" || revision.strategy === "replace-drawing-v1"), "Unknown completed drawing revision strategy");
+  return revision.strategy === "replace-drawing-v1" ? "BR" : "BD";
+}
 interface Completion { status: "cloud-applied-native-unverified"; note: CloudKitRecord; documentRevision: DocumentRevisionSummary; }
 type Outcome = Completion | { status: "ambiguous" };
 
@@ -77,7 +82,7 @@ export async function prepareDrawingTitleRename(input: DrawingTitleRenameOptions
   const previous = await attempts(), last = previous.at(-1);
   const saved = last ? await readProbeJournal(path.join(directory, last, "complete.json")) : undefined;
   const started = last ? await readProbeJournal(path.join(directory, last, "begin.json")) : undefined;
-  async function verifyCapture(capture: DrawingCapture, kind: "A" | "BD", operationId: string, attempt: string,
+  async function verifyCapture(capture: DrawingCapture, kind: "A" | TerminalPhase, operationId: string, attempt: string,
     original: CloudKitRecord[], targetTitle: string, date: number, revision: DocumentRevisionSummary) {
     const marker = path.join(attempt, "phases", operationId, `${kind}.ack.json`);
     const rawAck = await readProbeJournal(marker), intent = await readProbeJournal(marker.replace(".ack.json", ".intent.json"));
@@ -89,7 +94,7 @@ export async function prepareDrawingTitleRename(input: DrawingTitleRenameOptions
     const drawing = expected.find(record => record.recordType === "Attachment"), note = expected.find(record => record.recordType === "Note");
     assert.ok(note && drawing, "Missing expected phase records");
     drawing.fields.UserTitle = { type: "ENCRYPTED_BYTES", value: encoded };
-    if (kind === "BD") {
+    if (kind !== "A") {
       assert.equal(capture.documentSha256, revision.documentSha256, "Unexpected causal document revision");
       const capturedNote = capture.records.find(record => record.recordType === "Note");
       assert.ok(capturedNote?.fields.TextDataEncrypted?.type === "ENCRYPTED_BYTES", "Missing causal document");
@@ -105,11 +110,12 @@ export async function prepareDrawingTitleRename(input: DrawingTitleRenameOptions
     const completion = JSON.parse(saved) as Complete, begin = JSON.parse(started) as { local?: { targetTitle?: unknown }; documentRevision?: unknown; baseline?: unknown; modificationDate?: unknown };
     assert.equal(completion.identitySha256, sha(started), "Title completion identity changed");
     equal(completion.documentRevision, begin.documentRevision, "Title completion revision changed");
-    const raw = await readProbeJournal(path.join(directory, last, "after-BD", "complete.json"));
+    const completedPhase = terminalPhase(completion.documentRevision);
+    const raw = await readProbeJournal(path.join(directory, last, `after-${completedPhase}`, "complete.json"));
     assert.ok(raw && sha(raw) === completion.captureSha256, "Incomplete title preservation evidence");
     const capture = JSON.parse(raw) as DrawingCapture;
     assert.ok(Array.isArray(begin.baseline) && typeof begin.local?.targetTitle === "string" && Number.isSafeInteger(begin.modificationDate), "Invalid completed title intent");
-    await verifyCapture(capture, "BD", completion.operationId, path.join(directory, last), begin.baseline, begin.local.targetTitle, begin.modificationDate as number, completion.documentRevision);
+    await verifyCapture(capture, completedPhase, completion.operationId, path.join(directory, last), begin.baseline, begin.local.targetTitle, begin.modificationDate as number, completion.documentRevision);
     if (json(begin.local) !== json(local)) return undefined;
     equal([...await io.lookup([scope.noteId, scope.attachmentId])].sort((a, b) => a.recordName.localeCompare(b.recordName)), records(capture), "Completed title cloud state changed");
     await check();
@@ -129,7 +135,7 @@ export async function prepareDrawingTitleRename(input: DrawingTitleRenameOptions
     const expected = structuredClone(baseline), drawing = expected.find(record => record.recordName.toUpperCase() === scope.attachmentId.toUpperCase());
     assert.ok(drawing, "Missing drawing record");
     drawing.fields.UserTitle = { type: "ENCRYPTED_BYTES", value: Buffer.from(local.targetTitle).toString("base64") };
-    const preview = await runAttachmentTitleProbe({ scope, baseline, expected, phase: "BD", targetTitle: local.targetTitle, modificationDate, journalDirectory: directory });
+    const preview = await runAttachmentTitleProbe({ scope, baseline, expected, phase: "BR", targetTitle: local.targetTitle, modificationDate, journalDirectory: directory });
     assert.ok(preview.documentRevision, "Missing guarded document revision"); documentRevision = preview.documentRevision;
   }
   return { documentRevision, verifyLocalIntent: check, execute: async (): Promise<Outcome> => {
@@ -159,7 +165,7 @@ export async function prepareDrawingTitleRename(input: DrawingTitleRenameOptions
         update: async update => { await check(); await io.update(update); await check(); },
         updateBatch: async () => { throw Error("Production title workflow never sends batches"); },
       };
-      const phase = async (kind: "A" | "BD", expected: CloudKitRecord[]) => {
+      const phase = async (kind: "A" | "BR", expected: CloudKitRecord[]) => {
         const result = await runAttachmentTitleProbe({ scope, baseline, expected, phase: kind, targetTitle: local.targetTitle, modificationDate, journalDirectory: path.join(attempt, "phases") }, { apply: true }, checkedIO);
         assert.equal(result.status, "cloud-applied-native-unverified", "Uncertain title phase");
         return result;
@@ -169,16 +175,16 @@ export async function prepareDrawingTitleRename(input: DrawingTitleRenameOptions
       await verifyCapture(afterA, "A", a.operationId, attempt, baseline, local.targetTitle, modificationDate, documentRevision);
       equal({ doc: afterA.documentSha256, assets: afterA.assets }, { doc: before.documentSha256, assets: before.assets }, "A preservation changed");
       await check();
-      const beforeBD = await ports.capture(scope, io.lookup, { directory: path.join(attempt, "before-BD") });
-      equal(beforeBD, afterA, "Cloud changed between title phases");
-      const bd = await phase("BD", beforeBD.records);
-      const after = await ports.capture(scope, io.lookup, { directory: path.join(attempt, "after-BD") });
-      await verifyCapture(after, "BD", bd.operationId, attempt, baseline, local.targetTitle, modificationDate, documentRevision);
+      const beforeBR = await ports.capture(scope, io.lookup, { directory: path.join(attempt, "before-BR") });
+      equal(beforeBR, afterA, "Cloud changed between title phases");
+      const br = await phase("BR", beforeBR.records);
+      const after = await ports.capture(scope, io.lookup, { directory: path.join(attempt, "after-BR") });
+      await verifyCapture(after, "BR", br.operationId, attempt, baseline, local.targetTitle, modificationDate, documentRevision);
       equal(after.assets, before.assets, "Drawing asset preservation changed");
       assert.equal(after.documentSha256, documentRevision.documentSha256, "Exact guarded document revision changed");
       await check();
-      const raw = await readProbeJournal(path.join(attempt, "after-BD", "complete.json")); assert.ok(raw, "Missing final title capture");
-      await createProbeJournal(path.join(attempt, "complete.json"), JSON.stringify({ identitySha256: sha(begin), captureSha256: sha(raw), documentRevision, operationId: bd.operationId } satisfies Complete));
+      const raw = await readProbeJournal(path.join(attempt, "after-BR", "complete.json")); assert.ok(raw, "Missing final title capture");
+      await createProbeJournal(path.join(attempt, "complete.json"), JSON.stringify({ identitySha256: sha(begin), captureSha256: sha(raw), documentRevision, operationId: br.operationId } satisfies Complete));
       const note = after.records.find(record => record.recordName === scope.noteId); assert.ok(note);
       return { status: "cloud-applied-native-unverified", note, documentRevision };
     } catch { return { status: "ambiguous" }; }
