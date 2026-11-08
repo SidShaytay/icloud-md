@@ -10,6 +10,8 @@ import { buildInitialNoteDocument, encodeNoteDocument } from "../src/notes/noteD
 import { compressNoteDocument } from "../src/notes/noteText.js";
 import { runAttachmentTitleProbe, type TitleProbeIO, type TitleProbeRequest } from "./attachmentTitleProbe.js";
 import { probeJournalDurability } from "./attachmentTitleProbeJournal.js";
+import { parseNoteDocument } from "../src/notes/noteDocument.js";
+import { decompressNoteDocument } from "../src/notes/noteText.js";
 
 const noteId = "11111111-1111-4111-8111-111111111111";
 const attachmentId = "22222222-2222-4222-8222-222222222222";
@@ -292,3 +294,38 @@ test("shared terminal durability failure cannot dispatch or replay BA", () => fi
   await assert.rejects(runAttachmentTitleProbe({ ...request, phase: "B" }, { apply: true }, f.io), /terminal|another|alternate/i);
   assert.equal(f.writes.length, 1);
 }));
+
+test("BD discloses and writes only the internally computed neutral document revision", () => fixture(async f => {
+  await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
+  const request = { ...f.request, phase: "BD" as const, expected: structuredClone(f.cloud) };
+  const preview = await runAttachmentTitleProbe(request);
+  assert.equal(preview.documentRevision?.strategy, "trailing-tombstone-v1");
+  assert.notEqual(preview.documentRevision?.documentSha256, preview.documentRevision?.previousDocumentSha256);
+  const result = await runAttachmentTitleProbe(request, { apply: true }, f.io);
+  assert.equal(result.status, "cloud-applied-native-unverified");
+  assert.deepEqual(result.documentRevision, preview.documentRevision);
+  assert.deepEqual(Object.keys(f.writes[1]!.fields), ["TitleEncrypted", "ModificationDate", "TextDataEncrypted"]);
+  const before = parseNoteDocument(decompressNoteDocument(Buffer.from(f.request.baseline[0]!.fields.TextDataEncrypted!.value as string, "base64")));
+  const after = parseNoteDocument(decompressNoteDocument(Buffer.from(f.cloud[0]!.fields.TextDataEncrypted!.value as string, "base64")));
+  assert.equal(after.text, before.text); assert.deepEqual(after.attributeRuns, before.attributeRuns);
+  assert.equal(after.runs.length, before.runs.length + 1); assert.deepEqual(f.cloud[1], request.expected[1]);
+}));
+
+test("BD refuses any payload beyond its exact deterministic revision", () => fixture(async f => {
+  await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
+  const request = { ...f.request, phase: "BD" as const, expected: structuredClone(f.cloud) };
+  const io = { ...f.io, update: async (update: RecordUpdate) => { await f.io.update(update); f.cloud[0]!.fields.TextDataEncrypted = structuredClone(f.request.baseline[0]!.fields.TextDataEncrypted!); } };
+  assert.equal((await runAttachmentTitleProbe(request, { apply: true }, io)).status, "ambiguous");
+  assert.equal((await runAttachmentTitleProbe(request, { apply: true }, io)).status, "ambiguous");
+  assert.equal(f.writes.length, 2);
+}));
+
+for (const first of ["B", "BA", "BD"] as const) {
+  test(`terminal ${first} history excludes every other document/batch alternative`, () => fixture(async f => {
+    await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
+    const expected = structuredClone(f.cloud), fail = async () => { throw Error("uncertain terminal dispatch"); };
+    assert.equal((await runAttachmentTitleProbe({ ...f.request, phase: first, expected }, { apply: true }, { ...f.io, update: fail, updateBatch: fail })).status, "ambiguous");
+    for (const other of ["B", "BA", "BD"] as const) if (other !== first) await assert.rejects(runAttachmentTitleProbe({ ...f.request, phase: other, expected }, { apply: true }, f.io), /terminal|another|alternate/i);
+    assert.equal(f.writes.length, 1);
+  }));
+}

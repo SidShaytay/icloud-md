@@ -289,3 +289,40 @@ test("BA repeats the final local authority check before its single batch dispatc
   assert.equal((await runAttachmentTitleRunner(options, { ...f.ports, connect: async () => io })).status, "ambiguous");
   assert.equal(f.batches.length, 0); assert.equal(f.writes.length, 1);
 }));
+
+test("BD preview discloses the exact final document hash while local/drawing bytes stay intact", () => fixture(async f => {
+  const stateBefore = await readFile(path.join(f.vault, ".icloud-md/state.json"));
+  await runAttachmentTitleRunner(await approved(f), f.ports);
+  const options = { ...f.options, phase: "BD" as const, modificationDate: 3_000 };
+  const preview = await runAttachmentTitleRunner(options, f.ports);
+  assert.equal(preview.documentRevision?.strategy, "trailing-tombstone-v1");
+  assert.deepEqual(preview.fieldMask, ["TitleEncrypted", "ModificationDate", "TextDataEncrypted"]);
+  const result = await runAttachmentTitleRunner({ ...options, apply: true, expectedPlanSha256: preview.planSha256 }, f.ports);
+  assert.equal(result.status, "cloud-applied-native-unverified");
+  assert.deepEqual(result.documentRevision, preview.documentRevision);
+  assert.equal(sha(Buffer.from(f.cloud[0]!.fields.TextDataEncrypted!.value as string, "base64")), preview.documentRevision!.documentSha256);
+  assert.notEqual(preview.documentRevision!.documentSha256, preview.documentRevision!.previousDocumentSha256);
+  assert.equal(await readFile(path.join(f.vault, f.file), "utf8"), f.local);
+  assert.deepEqual(await readFile(path.join(f.vault, ".icloud-md/state.json")), stateBefore);
+  assert.equal(f.batches.length, 0); assert.equal(f.writes.length, 2); assert.equal(f.captures.length, 4);
+}));
+
+test("BD's document allowance never weakens asset-byte preservation", () => fixture(async f => {
+  await runAttachmentTitleRunner(await approved(f), f.ports);
+  const options = await approved(f, { ...f.options, phase: "BD" });
+  const capture = f.ports.capture;
+  const ports = { ...f.ports, capture: async (...args: Parameters<typeof capture>) => {
+    const result = await capture(...args); if (f.writes.length > 1) result.assets[0]!.sha256 = "d".repeat(64); return result;
+  } };
+  assert.equal((await runAttachmentTitleRunner(options, ports)).status, "ambiguous");
+  assert.equal(f.writes.length, 2);
+}));
+
+test("a prior ambiguous BA caller intent blocks BD before any new dispatch", () => fixture(async f => {
+  await runAttachmentTitleRunner(await approved(f), f.ports);
+  const options = await approved(f, { ...f.options, phase: "BA" });
+  const ports = { ...f.ports, connect: async () => ({ ...f.io, updateBatch: async () => { throw Error("uncertain batch"); } }) };
+  assert.equal((await runAttachmentTitleRunner(options, ports)).status, "ambiguous");
+  await assert.rejects(runAttachmentTitleRunner({ ...f.options, phase: "BD" }, f.ports), /terminal|another|alternate/i);
+  assert.equal(f.writes.length, 1);
+}));
