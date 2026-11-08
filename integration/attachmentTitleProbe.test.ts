@@ -55,6 +55,7 @@ async function setup() {
       for (const [key, field] of Object.entries(update.fields)) record.fields[key] = { type: key === "ModificationDate" ? "TIMESTAMP" : "ENCRYPTED_BYTES", ...field };
       record.recordChangeTag += "+";
     },
+    updateBatch: async updates => { for (const update of updates) await io.update(update); },
   };
   return { directory, cloud, request, writes, io };
 }
@@ -204,3 +205,90 @@ for (const field of ["referenceChecksum", "wrappingKey"]) {
     assert.equal(f.writes.length, 1);
   }));
 }
+
+test("BA atomically requests Note title/date followed by already-set attachment title", () => fixture(async f => {
+  await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
+  const request = { ...f.request, phase: "BA" as const, expected: structuredClone(f.cloud) };
+  let batches = 0;
+  const io = { ...f.io, updateBatch: async (updates: RecordUpdate[]) => { batches++; await f.io.updateBatch(updates); } };
+  assert.equal((await runAttachmentTitleProbe(request)).status, "preview");
+  const result = await runAttachmentTitleProbe(request, { apply: true }, io);
+  assert.equal(result.status, "cloud-applied-native-unverified");
+  assert.equal(batches, 1);
+  assert.deepEqual(f.writes.slice(1).map(update => [update.recordType, update.recordChangeTag, Object.keys(update.fields)]), [
+    ["Note", "note-tag", ["TitleEncrypted", "ModificationDate"]], ["Attachment", "attachment-tag+", ["UserTitle"]],
+  ]);
+  assert.equal(f.cloud[0]!.recordChangeTag, "note-tag+"); assert.equal(f.cloud[1]!.recordChangeTag, "attachment-tag++");
+  assert.deepEqual(f.cloud[0]!.fields.TextDataEncrypted, f.request.baseline[0]!.fields.TextDataEncrypted);
+  assert.deepEqual(f.cloud[1]!.fields.PaperDatabase, f.request.baseline[1]!.fields.PaperDatabase);
+}));
+
+test("BA requires the exact durable A history and matching fresh versions", () => fixture(async f => {
+  f.cloud[1]!.fields.UserTitle!.value = encoded("New drawing");
+  await assert.rejects(runAttachmentTitleProbe({ ...f.request, phase: "BA", expected: structuredClone(f.cloud) }, { apply: true }, f.io), /acknowledg/i);
+  assert.equal(f.writes.length, 0);
+}));
+
+test("BA lost or partial response is terminal and never falls back to single writes", () => fixture(async f => {
+  await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
+  const request = { ...f.request, phase: "BA" as const, expected: structuredClone(f.cloud) };
+  let batches = 0;
+  const io = { ...f.io, updateBatch: async (updates: RecordUpdate[]) => { batches++; await f.io.update(updates[0]!); throw Error("lost batch response"); } };
+  assert.equal((await runAttachmentTitleProbe(request, { apply: true }, io)).status, "ambiguous");
+  assert.equal((await runAttachmentTitleProbe(request, { apply: true }, io)).status, "ambiguous");
+  assert.equal(batches, 1); assert.equal(f.writes.length, 2);
+}));
+
+for (const first of ["B", "BA"] as const) {
+  test(`an ambiguous ${first} intent cannot be retried through its alternate terminal phase`, () => fixture(async f => {
+    await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
+    const expected = structuredClone(f.cloud);
+    const stop = async () => { throw Error("simulated pre-dispatch uncertainty"); };
+    const result = await runAttachmentTitleProbe({ ...f.request, phase: first, expected }, { apply: true }, { ...f.io, update: stop, updateBatch: stop });
+    assert.equal(result.status, "ambiguous");
+    const alternate = first === "B" ? "BA" : "B";
+    await assert.rejects(runAttachmentTitleProbe({ ...f.request, phase: alternate, expected }, { apply: true }, f.io), /terminal|another|alternate/i);
+    assert.equal(f.writes.length, 1);
+  }));
+}
+
+test("BA requires both target ETags to advance and preserves every asset reference", () => fixture(async f => {
+  await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
+  const request = { ...f.request, phase: "BA" as const, expected: structuredClone(f.cloud) };
+  const io = { ...f.io, updateBatch: async (updates: RecordUpdate[]) => { await f.io.updateBatch(updates); f.cloud[1]!.recordChangeTag = request.expected[1]!.recordChangeTag; } };
+  assert.equal((await runAttachmentTitleProbe(request, { apply: true }, io)).status, "ambiguous");
+}));
+
+test("simultaneous B and BA claim one shared terminal intent", () => fixture(async f => {
+  await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
+  const expected = structuredClone(f.cloud); let terminalCalls = 0, lookups = 0;
+  let releaseLookups!: () => void, releaseDispatch!: () => void;
+  const bothPreflight = new Promise<void>(resolve => { releaseLookups = resolve; });
+  const bothDispatch = new Promise<void>(resolve => { releaseDispatch = resolve; });
+  const enter = async () => { if (++terminalCalls === 2) releaseDispatch(); await Promise.race([bothDispatch, new Promise(resolve => setTimeout(resolve, 200))]); };
+  const io = { ...f.io, lookup: async (ids: string[]) => {
+    const records = await f.io.lookup(ids);
+    if (++lookups <= 2) { if (lookups === 2) releaseLookups(); await bothPreflight; }
+    return records;
+  }, update: async (update: RecordUpdate) => { await enter(); await f.io.update(update); }, updateBatch: async (updates: RecordUpdate[]) => { await enter(); await f.io.updateBatch(updates); } };
+  await Promise.allSettled([runAttachmentTitleProbe({ ...f.request, phase: "B", expected }, { apply: true }, io), runAttachmentTitleProbe({ ...f.request, phase: "BA", expected }, { apply: true }, io)]);
+  assert.equal(terminalCalls, 1);
+}));
+
+test("shared terminal durability failure cannot dispatch or replay BA", () => fixture(async f => {
+  await runAttachmentTitleProbe(f.request, { apply: true }, f.io);
+  const request = { ...f.request, phase: "BA" as const, expected: structuredClone(f.cloud) };
+  const sync = probeJournalDurability.sync;
+  probeJournalDurability.sync = async file => {
+    if ((await file.stat()).isFile()) {
+      const target = await import("node:fs/promises").then(fs => fs.readlink(`/proc/self/fd/${file.fd}`));
+      if (target.endsWith("terminal.intent.json")) throw Error("injected terminal fsync failure");
+    }
+    await sync(file);
+  };
+  try { assert.equal((await runAttachmentTitleProbe(request, { apply: true }, f.io)).status, "ambiguous"); }
+  finally { probeJournalDurability.sync = sync; }
+  assert.equal((await runAttachmentTitleProbe(request, { apply: true }, f.io)).status, "ambiguous");
+  await assert.rejects(runAttachmentTitleProbe({ ...request, phase: "B" }, { apply: true }, f.io), /terminal|another|alternate/i);
+  assert.equal(f.writes.length, 1);
+}));

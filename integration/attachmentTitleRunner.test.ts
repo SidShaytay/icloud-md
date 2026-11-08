@@ -14,6 +14,7 @@ import { composeNoteFile } from "../src/notes/noteIdFrontmatter.js";
 import { compressNoteDocument } from "../src/notes/noteText.js";
 import { formatEmbedMarker } from "../src/notes/unknownContent.js";
 import { probeJournalDurability } from "./attachmentTitleProbeJournal.js";
+import type { TitleProbeIO } from "./attachmentTitleProbe.js";
 import { parseAttachmentTitleRunnerArgs, runAttachmentTitleRunner, type TitleRunnerOptions, type TitleRunnerPorts } from "./attachmentTitleRunner.js";
 
 const noteId = "AAAA1111-1111-4111-8111-111111111111";
@@ -51,13 +52,13 @@ async function setup() {
   ];
   let now = 1_000;
   const options: TitleRunnerOptions = { vault, file, noteId, attachmentId, folderId, journalDirectory: path.join(root, "journal"), phase: "A", modificationDate: 2_000, deadline: 10_000 };
-  const writes: RecordUpdate[] = [], captures: string[] = [];
-  const io = { accountDsidSha256: sha(account.dsid), lookup: async (ids: string[]) => structuredClone(cloud.filter(r => ids.includes(r.recordName))), update: async (update: RecordUpdate) => {
+  const writes: RecordUpdate[] = [], batches: RecordUpdate[][] = [], captures: string[] = [];
+  const io: TitleProbeIO = { accountDsidSha256: sha(account.dsid), lookup: async (ids: string[]) => structuredClone(cloud.filter(r => ids.includes(r.recordName))), update: async (update: RecordUpdate) => {
     writes.push(structuredClone(update)); const record = cloud.find(r => r.recordName === update.recordName)!;
     assert.equal(record.recordChangeTag, update.recordChangeTag);
     for (const [key, field] of Object.entries(update.fields)) record.fields[key] = { ...field, type: key === "ModificationDate" ? "TIMESTAMP" : "ENCRYPTED_BYTES" };
     record.recordChangeTag += "+";
-  } };
+  }, updateBatch: async updates => { batches.push(structuredClone(updates)); for (const update of updates) await io.update(update); } };
   const ports: TitleRunnerPorts = { connect: async () => io, assertLock: async () => {}, lockAuthority: async () => ({ path: "/fixture/sync.lock", dev: "1", ino: "2" }), now: () => now,
     capture: async (scope, lookup, opts) => {
       const records = await lookup([scope.noteId, scope.attachmentId]);
@@ -66,7 +67,7 @@ async function setup() {
       return result;
     },
   };
-  return { root, vault, body, file, local, state, cloud, options, writes, captures, ports, io, expire: () => { now = 20_000; } };
+  return { root, vault, body, file, local, state, cloud, options, writes, batches, captures, ports, io, expire: () => { now = 20_000; } };
 }
 async function approved(f: Awaited<ReturnType<typeof setup>>, options = f.options) {
   const preview = await runAttachmentTitleRunner(options, f.ports);
@@ -257,3 +258,34 @@ for (const deletion of ["field-deleted", "malformed-field", "record-deleted"] as
     assert.equal(f.writes.length, 0);
   }));
 }
+
+test("checked runner supports A followed by one captured atomic BA request", () => fixture(async f => {
+  await runAttachmentTitleRunner(await approved(f), f.ports);
+  const options = { ...f.options, phase: "BA" as const, modificationDate: 3_000 };
+  const result = await runAttachmentTitleRunner(await approved(f, options), f.ports);
+  assert.equal(result.status, "cloud-applied-native-unverified"); assert.equal(f.batches.length, 1);
+  assert.deepEqual(f.batches[0]!.map(update => update.recordType), ["Note", "Attachment"]);
+  assert.equal(f.writes.length, 3); assert.equal(f.captures.length, 4);
+  assert.equal(await readFile(path.join(f.vault, f.file), "utf8"), f.local);
+}));
+
+test("BA cannot bypass an existing ambiguous B caller intent", () => fixture(async f => {
+  await runAttachmentTitleRunner(await approved(f), f.ports);
+  const options = await approved(f, { ...f.options, phase: "B" });
+  const ports = { ...f.ports, connect: async () => ({ ...f.io, update: async () => { throw Error("lost before acknowledgement"); } }) };
+  assert.equal((await runAttachmentTitleRunner(options, ports)).status, "ambiguous");
+  await assert.rejects(runAttachmentTitleRunner({ ...f.options, phase: "BA" }, f.ports), /terminal|another|alternate/i);
+  assert.equal(f.writes.length, 1); assert.equal(f.batches.length, 0);
+}));
+
+test("BA repeats the final local authority check before its single batch dispatch", () => fixture(async f => {
+  await runAttachmentTitleRunner(await approved(f), f.ports);
+  const options = await approved(f, { ...f.options, phase: "BA" }); let folderLookups = 0;
+  const io = { ...f.io, lookup: async (ids: string[]) => {
+    const result = await f.io.lookup(ids);
+    if (ids.includes(folderId) && ++folderLookups === 2) await writeFile(path.join(f.vault, f.file), f.local + "changed");
+    return result;
+  } };
+  assert.equal((await runAttachmentTitleRunner(options, { ...f.ports, connect: async () => io })).status, "ambiguous");
+  assert.equal(f.batches.length, 0); assert.equal(f.writes.length, 1);
+}));

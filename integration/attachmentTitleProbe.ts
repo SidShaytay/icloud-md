@@ -15,13 +15,14 @@ import type { HarnessAccount } from "./harnessAccount.js";
 import { createProbeJournal, privateProbeDirectory, readProbeJournal } from "./attachmentTitleProbeJournal.js";
 
 interface ProbeScope { noteId: string; attachmentId: string; folderId: string; accountDsidSha256: string; }
+export type TitleProbePhase = "A" | "B" | "BA";
 export interface TitleProbeRequest {
   scope: ProbeScope;
   /** Original snapshots before either phase; keep the same baseline for B. */
   baseline: CloudKitRecord[];
   /** Independently captured current versions, explicitly reviewed for this phase. */
   expected: CloudKitRecord[];
-  phase: "A" | "B";
+  phase: TitleProbePhase;
   targetTitle: string;
   modificationDate: number;
   journalDirectory: string;
@@ -30,10 +31,11 @@ export interface TitleProbeIO {
   accountDsidSha256: string;
   lookup(ids: string[]): Promise<CloudKitRecord[]>;
   update(update: RecordUpdate): Promise<void>;
+  updateBatch(updates: RecordUpdate[]): Promise<void>;
 }
 interface ProbeResult {
   status: "preview" | "cloud-applied-native-unverified" | "already-recorded-native-unverified" | "ambiguous";
-  phase: "A" | "B";
+  phase: TitleProbePhase;
   operationId: string;
   fields: string[];
 }
@@ -76,13 +78,15 @@ function tags(records: CloudKitRecord[]) {
   return Object.fromEntries(records.map(record => [record.recordName, record.recordChangeTag]));
 }
 
-/** B is a separate invocation using only Linux journals and current CloudKit
+/** B or BA is a separate invocation using only Linux journals and current CloudKit
  * state. Neither phase calls or waits for any native device. Live use requires
- * a separately approved experiment; an acknowledged phase is never replayed. */
+ * a separately approved experiment; an acknowledged phase is never replayed.
+ * BA tests native-shaped Note-before-Attachment order in one atomic request;
+ * server write order does not guarantee a device's import callback order. */
 export async function runAttachmentTitleProbe(request: TitleProbeRequest, options: { apply?: boolean } = {}, io?: TitleProbeIO): Promise<ProbeResult> {
   // Detach caller objects before any await; later mutation cannot change intent.
   const r = structuredClone(request);
-  assert.ok(r.phase === "A" || r.phase === "B", "Invalid probe phase");
+  assert.ok(r.phase === "A" || r.phase === "B" || r.phase === "BA", "Invalid probe phase");
   assert.ok(r.targetTitle && titleIsRepresentable(r.targetTitle) && !/[\r\n\0]/.test(r.targetTitle), "Unsupported filename title");
   assert.ok(Number.isSafeInteger(r.modificationDate) && r.modificationDate > 0 && path.isAbsolute(r.journalDirectory), "Invalid probe journal/date");
   const baseline = checkedScope(r.baseline, r.scope), expected = checkedScope(r.expected, r.scope);
@@ -90,24 +94,30 @@ export async function runAttachmentTitleProbe(request: TitleProbeRequest, option
   const encoded = Buffer.from(r.targetTitle).toString("base64");
   assert.ok(typeof title(baseline.note, "TitleEncrypted") === "string" && title(baseline.note, "TitleEncrypted") !== encoded, "Baseline already has this note title");
   if (r.phase === "A") assert.ok(snapshot(r.baseline) === snapshot(r.expected), "Phase A baseline changed");
-  else assert.ok(title(expected.attachment, "UserTitle") === encoded && title(expected.note, "TitleEncrypted") === title(baseline.note, "TitleEncrypted"), "Phase B title baseline changed");
+  else assert.ok(title(expected.attachment, "UserTitle") === encoded && title(expected.note, "TitleEncrypted") === title(baseline.note, "TitleEncrypted"), "Terminal phase title baseline changed");
   const record = r.phase === "A" ? expected.attachment : expected.note;
   const update: RecordUpdate = { recordName: record.recordName, recordType: record.recordType, recordChangeTag: record.recordChangeTag!, parentRecordName: record.parentRecordName,
     fields: r.phase === "A" ? { UserTitle: { value: encoded } } : { TitleEncrypted: { value: encoded }, ModificationDate: { value: r.modificationDate } } };
+  const updates = r.phase === "BA" ? [update, { recordName: expected.attachment.recordName, recordType: "Attachment", recordChangeTag: expected.attachment.recordChangeTag!, parentRecordName: expected.attachment.parentRecordName, fields: { UserTitle: { value: encoded } } }] : [update];
   const operationId = sha256(JSON.stringify([stable(r.scope), snapshot(r.baseline), r.targetTitle]));
-  const base = { phase: r.phase, operationId, fields: Object.keys(update.fields) };
+  const base = { phase: r.phase, operationId, fields: r.phase === "BA" ? updates.flatMap(item => Object.keys(item.fields).map(key => `${item.recordType}.${key}`)) : Object.keys(update.fields) };
   if (options.apply !== true) return { ...base, status: "preview" };
   assert.ok(io && io.accountDsidSha256 === r.scope.accountDsidSha256, "Wrong probe account");
   const directory = path.join(r.journalDirectory, operationId);
   const marker = path.join(directory, `${r.phase}.intent.json`), ack = path.join(directory, `${r.phase}.ack.json`);
-  const identity = JSON.stringify({ operationId, phase: r.phase, update });
+  const identity = JSON.stringify({ operationId, phase: r.phase, ...(r.phase === "BA" ? { updates } : { update }) });
   const previous = await readProbeJournal(marker), acknowledged = await readProbeJournal(ack);
   if (previous !== undefined || acknowledged !== undefined) {
     let matches = false;
     try { matches = previous === identity && acknowledged !== undefined && JSON.parse(acknowledged).identity === identity; } catch { /* A corrupt journal is never replayed. */ }
     return { ...base, status: matches ? "already-recorded-native-unverified" : "ambiguous" };
   }
-  if (r.phase === "B") {
+  if (r.phase !== "A") {
+    const alternate = r.phase === "B" ? "BA" : "B";
+    const terminal = await readProbeJournal(path.join(directory, "terminal.intent.json"));
+    // A crash may leave the shared claim without its phase-specific marker.
+    if (terminal === identity) return { ...base, status: "ambiguous" };
+    assert.ok(terminal === undefined && await readProbeJournal(path.join(directory, `${alternate}.intent.json`)) === undefined && await readProbeJournal(path.join(directory, `${alternate}.ack.json`)) === undefined, "Another terminal phase exists; never retry through an alternate");
     const a = await readProbeJournal(path.join(directory, "A.ack.json"));
     const aIntent = await readProbeJournal(path.join(directory, "A.intent.json"));
     assert.ok(a && aIntent, "Phase B requires this operation's A acknowledgement");
@@ -125,20 +135,26 @@ export async function runAttachmentTitleProbe(request: TitleProbeRequest, option
   try {
     await privateProbeDirectory(r.journalDirectory);
     await privateProbeDirectory(directory);
+    // One exclusive durable choice also excludes simultaneous B versus BA.
+    if (r.phase !== "A") await createProbeJournal(path.join(directory, "terminal.intent.json"), identity);
     await createProbeJournal(marker, identity);
     await inspectExpected();
-    await io.update(update);
+    if (r.phase === "BA") await io.updateBatch(updates); else await io.update(update);
     const after = await io.lookup([r.scope.noteId, r.scope.attachmentId]);
     const checked = checkedScope(after, r.scope);
     assert.ok(snapshot(after, true) === snapshot(r.baseline, true), "Post-write preservation failure");
-    const untouched = r.phase === "A" ? checked.note : checked.attachment;
-    const oldUntouched = r.phase === "A" ? expected.note : expected.attachment;
-    assert.ok(snapshot([untouched]) === snapshot([oldUntouched]), "Untargeted record changed");
+    if (r.phase === "BA") {
+      assert.ok(checked.attachment.recordChangeTag !== expected.attachment.recordChangeTag && checked.attachment.fields.UserTitle?.type === "ENCRYPTED_BYTES" && title(checked.attachment, "UserTitle") === encoded, "Batch attachment event not observed");
+    } else {
+      const untouched = r.phase === "A" ? checked.note : checked.attachment;
+      const oldUntouched = r.phase === "A" ? expected.note : expected.attachment;
+      assert.ok(snapshot([untouched]) === snapshot([oldUntouched]), "Untargeted record changed");
+    }
     const targeted = r.phase === "A" ? checked.attachment : checked.note;
     const titleKey = r.phase === "A" ? "UserTitle" : "TitleEncrypted";
     assert.ok(targeted.recordChangeTag !== record.recordChangeTag, "New cloud version not observed");
     assert.ok(title(targeted, titleKey) === encoded && targeted.fields[titleKey]?.type === "ENCRYPTED_BYTES", "Cloud title not observed");
-    if (r.phase === "B") assert.ok(checked.note.fields.ModificationDate?.value === r.modificationDate, "Note event not observed");
+    if (r.phase !== "A") assert.ok(checked.note.fields.ModificationDate?.value === r.modificationDate, "Note event not observed");
     await createProbeJournal(ack, JSON.stringify({ operationId, identity, tags: tags(after) }));
     return { ...base, status: "cloud-applied-native-unverified" };
   } catch {
@@ -158,6 +174,11 @@ export function createAttachmentTitleProbeIO(account: HarnessAccount): TitleProb
     update: async update => {
       const result = await updateRecords(session, ckdatabasewsUrl, dsid, "private", zoneID, [update], { redirect: "error", signal: AbortSignal.timeout(30_000) });
       assert.ok(result.length === 1 && result[0]!.ok && result[0]!.record.recordName === update.recordName && result[0]!.record.recordType === update.recordType, "Cloud update was rejected or unclear");
+    },
+    updateBatch: async updates => {
+      assert.ok(updates.length === 2 && updates[0]!.recordType === "Note" && updates[1]!.recordType === "Attachment" && updates[0]!.recordName !== updates[1]!.recordName, "Expected one Note-before-Attachment batch");
+      const result = await updateRecords(session, ckdatabasewsUrl, dsid, "private", zoneID, updates, { atomic: true, redirect: "error", signal: AbortSignal.timeout(30_000) });
+      assert.ok(result.length === updates.length && updates.every(update => result.some(entry => entry.ok && entry.record.recordName === update.recordName && entry.record.recordType === update.recordType)), "Cloud batch was rejected or unclear");
     },
   };
 }
