@@ -1115,7 +1115,10 @@ export type RecordUpdateResult = NoteUpdateResult;
 
 /** Optional transport controls for writes that must not follow redirects or
  * outlive their caller's deadline. Existing callers retain fetch defaults. */
-export type CloudKitWriteOptions = Pick<RequestInit, "redirect" | "signal">;
+export type CloudKitWriteOptions = Pick<RequestInit, "redirect" | "signal"> & {
+  /** CloudKit records/modify body option, not a fetch transport option. */
+  atomic?: boolean;
+};
 
 /**
  * Updates any number of records in one zone via a single `records/modify`
@@ -1159,7 +1162,7 @@ export async function updateRecords(
     dsid,
     database,
     "records/modify",
-    { operations, zoneID },
+    { operations, zoneID, ...(options?.atomic === undefined ? {} : { atomic: options.atomic }) },
     options,
   );
   return parseRecordUpdateResponse(body);
