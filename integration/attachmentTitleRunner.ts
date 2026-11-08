@@ -19,14 +19,14 @@ import { titleIsRepresentable } from "../src/notes/titleFilename.js";
 import { indexUntrackedNoteIds } from "../src/notes/untrackedFiles.js";
 import { formatEmbedMarker } from "../src/notes/unknownContent.js";
 import { assertAttachmentTitleLockHeld } from "./attachmentTitleLock.js";
-import { createAttachmentTitleProbeIO, runAttachmentTitleProbe, type TitleProbeIO, type TitleProbeRequest } from "./attachmentTitleProbe.js";
+import { createAttachmentTitleProbeIO, runAttachmentTitleProbe, type TitleProbeIO, type TitleProbeRequest, type TitleProbePhase } from "./attachmentTitleProbe.js";
 import { createProbeJournal, privateProbeDirectory, readProbeJournal } from "./attachmentTitleProbeJournal.js";
 import type { DrawingCapture } from "./attachmentTitleCapture.js";
 import { resolveHarnessAccount } from "./harnessAccount.js";
 
 export interface TitleRunnerOptions {
   vault: string; file: string; noteId: string; attachmentId: string; folderId: string;
-  journalDirectory: string; phase: "A" | "B"; modificationDate: number; deadline: number;
+  journalDirectory: string; phase: TitleProbePhase; modificationDate: number; deadline: number;
   apply?: boolean; expectedPlanSha256?: string;
 }
 export interface TitleRunnerPorts {
@@ -76,7 +76,7 @@ interface LocalIntent {
 interface SavedBaseline { version: 1; local: LocalIntent; scope: TitleProbeRequest["scope"]; capture: DrawingCapture; folders: CloudKitRecord[]; codeSha256: string; lockAuthority: Awaited<ReturnType<TitleRunnerPorts["lockAuthority"]>>; }
 interface RunnerResult {
   status: "preview" | "cloud-applied-native-unverified" | "ambiguous";
-  phase: "A" | "B"; planSha256: string; fieldMask: string[]; file: string; targetTitle: string;
+  phase: TitleProbePhase; planSha256: string; fieldMask: string[]; file: string; targetTitle: string;
   noteId: string; attachmentId: string; folderId: string; deadline: number; modificationDate: number; syncLockPath: string; captureSha256?: string;
 }
 async function absent(file: string) { try { await lstat(file); return false; } catch (error) { if (isEnoent(error)) return true; throw error; } }
@@ -136,7 +136,7 @@ function versions(capture: DrawingCapture) { return capture.records.map(record =
 
 export async function runAttachmentTitleRunner(input: TitleRunnerOptions, overrides: Partial<TitleRunnerPorts> = {}): Promise<RunnerResult> {
   const options = structuredClone(input), ports = { ...defaults, ...overrides };
-  assert.ok([options.noteId, options.attachmentId, options.folderId].every(isNoteId) && (options.phase === "A" || options.phase === "B"), "Invalid runner identity/phase");
+  assert.ok([options.noteId, options.attachmentId, options.folderId].every(isNoteId) && (options.phase === "A" || options.phase === "B" || options.phase === "BA"), "Invalid runner identity/phase");
   const checkDeadline = () => assert.ok(Number.isSafeInteger(options.deadline) && options.deadline > ports.now() && options.deadline - ports.now() <= 30 * 60_000, "Approval deadline expired or invalid");
   assert.ok(Number.isSafeInteger(options.modificationDate) && options.modificationDate > 0 && path.isAbsolute(options.journalDirectory), "Invalid date/journal");
   if (options.apply) { assert.ok(options.expectedPlanSha256 && /^[a-f0-9]{64}$/.test(options.expectedPlanSha256), "Apply requires an approved preview plan"); await ports.assertLock(); }
@@ -155,7 +155,9 @@ export async function runAttachmentTitleRunner(input: TitleRunnerOptions, overri
   const savedText = await readProbeJournal(baselineFile);
   const saved = savedText === undefined ? undefined : JSON.parse(savedText) as SavedBaseline;
   if (saved) { assert.ok(saved.version === 1 && saved.codeSha256 === codeSha256, "Existing baseline/code changed"); equal(saved.local, local, "Existing local intent changed"); equal(saved.lockAuthority, lockAuthority, "Existing sync lock authority changed"); }
-  if (options.phase === "B") {
+  if (options.phase !== "A") {
+    const alternate = options.phase === "B" ? "BA" : "B";
+    assert.ok(await readProbeJournal(path.join(journal, `${alternate}.request.json`)) === undefined, "Another terminal caller intent exists; never retry through an alternate");
     assert.ok(saved, "Phase A baseline is required");
     const a = await readProbeJournal(path.join(journal, "A.result.json"));
     assert.ok(a && JSON.parse(a).status === "cloud-applied-native-unverified", "Phase A has no complete acknowledgement");
@@ -183,7 +185,7 @@ export async function runAttachmentTitleRunner(input: TitleRunnerOptions, overri
     assert.ok(note!.recordChangeTag === state.notes[local.noteId]!.recordChangeTag, "Cloud note version differs from tracked state");
   } else equal(preserved(saved.capture), preserved(before), "Drawing/document bytes or references changed");
   const baseline: SavedBaseline = saved ?? { version: 1, local, scope, capture: before, folders, codeSha256, lockAuthority };
-  const fieldMask = options.phase === "A" ? ["UserTitle"] : ["TitleEncrypted", "ModificationDate"];
+  const fieldMask = options.phase === "A" ? ["UserTitle"] : options.phase === "B" ? ["TitleEncrypted", "ModificationDate"] : ["Note.TitleEncrypted", "Note.ModificationDate", "Attachment.UserTitle"];
   const planSha256 = sha(json({ local, scope, journal, canonicalJournal, lockAuthority, codeSha256, phase: options.phase, fieldMask, deadline: options.deadline, modificationDate: options.modificationDate,
     baseline: { data: preserved(baseline.capture), versions: versions(baseline.capture) }, current: { data: preserved(before), versions: versions(before) }, folders }));
   const result = { phase: options.phase, planSha256, fieldMask, file: local.file, targetTitle: local.targetTitle, noteId: scope.noteId, attachmentId: scope.attachmentId, folderId: scope.folderId, deadline: options.deadline, modificationDate: options.modificationDate, syncLockPath: lockAuthority.path };
@@ -199,16 +201,19 @@ export async function runAttachmentTitleRunner(input: TitleRunnerOptions, overri
   try {
     const captured = await ports.capture(scope, io.lookup, { directory: path.join(journal, `before-${options.phase}`) });
     equal(preserved(captured), preserved(before), "Pre-dispatch drawing bytes changed"); equal(versions(captured), versions(before), "Pre-dispatch cloud versions changed");
-    const checkedIO: TitleProbeIO = { ...io, update: async update => {
+    const beforeDispatch = async () => {
       await ports.assertLock(); checkDeadline();
       assert.ok(await ports.codeIdentity!() === codeSha256, "Executable code changed before dispatch");
       equal(await folderSnapshot(local, io), folders, "Private folder scope changed before dispatch");
       equal(await ports.lockAuthority(), lockAuthority, "Sync lock authority changed before dispatch");
       equal(await localIntent(options), local, "Local intent changed before dispatch");
       checkDeadline();
-      await io.update(update);
-      equal(await localIntent(options), local, "Local intent changed after dispatch");
-    } };
+    };
+    const afterDispatch = async () => equal(await localIntent(options), local, "Local intent changed after dispatch");
+    const checkedIO: TitleProbeIO = { ...io,
+      update: async update => { await beforeDispatch(); await io.update(update); await afterDispatch(); },
+      updateBatch: async updates => { await beforeDispatch(); await io.updateBatch(updates); await afterDispatch(); },
+    };
     const applied = await runAttachmentTitleProbe(request, { apply: true }, checkedIO);
     assert.ok(applied.status === "cloud-applied-native-unverified", "Phase result is uncertain; no replay");
     const after = await ports.capture(scope, io.lookup, { directory: path.join(journal, `after-${options.phase}`) });
@@ -232,7 +237,7 @@ export function parseAttachmentTitleRunnerArgs(args: string[]): TitleRunnerOptio
   }
   assert.ok(names.filter(name => name !== "expected-plan").every(name => values[name]), "Missing runner argument");
   assert.ok(!apply || /^[a-f0-9]{64}$/.test(values["expected-plan"] ?? ""), "Apply requires approved preview plan");
-  assert.ok(values.phase === "A" || values.phase === "B", "Invalid runner phase");
+  assert.ok(values.phase === "A" || values.phase === "B" || values.phase === "BA", "Invalid runner phase");
   return { vault: values.vault!, file: values.file!, noteId: values.note!, attachmentId: values.attachment!, folderId: values.folder!, journalDirectory: values.journal!, phase: values.phase,
     modificationDate: Number(values["modification-date"]), deadline: Number(values.deadline), apply, ...(values["expected-plan"] ? { expectedPlanSha256: values["expected-plan"] } : {}) };
 }
