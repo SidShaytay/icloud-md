@@ -23,3 +23,15 @@ test("CLI failures never print transport or signed-URL details", async () => {
   assert.doesNotMatch(errors.join(""), /private-url|secret-cookie/);
   assert.match(errors.join(""), /stopped/i);
 });
+
+test("CLI explicitly reports only the safe document-revision summary", async () => {
+  const output: string[] = [];
+  const summary = { strategy: "trailing-tombstone-v1", previousDocumentSha256: "a".repeat(64), documentSha256: "b".repeat(64), replicaIdSha256: "c".repeat(64) };
+  const code = await attachmentTitleRunnerCli([], {
+    run: async () => ({ status: "preview", phase: "BD", documentRevision: { ...summary, rawRecords: [{ signedURL: "private-url" }] } }),
+    stdout: text => output.push(text), stderr: () => assert.fail(),
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(JSON.parse(output[0]!).documentRevision, summary);
+  assert.doesNotMatch(output[0]!, /private-url|rawRecords/);
+});

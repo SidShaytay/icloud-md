@@ -164,10 +164,23 @@ not establish native import order. The separate A/B trial passed with a connecte
 Mac but left its list title stale when Notes was closed during the writes and
 reopened afterward; BA remains a diagnostic candidate, not a proven replacement.
 
+The alternative `BD` phase tests a content-neutral causal revision. It computes
+the new document internally by inserting then deleting only a fresh trailing
+character before any upload. It requires identical visible text, complete
+formatting spans, original atom/style metadata and original replica counters,
+with graph contraction recovering the old structure. Only the computed payload
+is allowed; an arbitrary document blob cannot be supplied. It does not restamp
+the drawing's original formatting. **Serialized document bytes change**, while
+drawing/preview bytes and references must remain identical. `B`, `BA` and `BD`
+share a terminal claim and cannot be used to retry each other. Native rendering
+and the preservation of an unseen client-local newline still require external
+verification; this diagnostic is not a supported rename fix.
+
 The checked experimental caller is `attachmentTitleRunner.ts`, launched through
 `integration/runAttachmentTitleProbe` on Linux. It verifies the unchanged local
-filename request, account/private-folder scope, exact compressed document and
-all drawing/preview bytes. It captures private evidence before and after a
+filename request, account/private-folder scope, exact expected compressed document
+(including the explicitly planned revision for BD), and all drawing/preview bytes.
+It captures private evidence before and after a
 write. Its approved preview digest binds those inputs, executable source,
 deadline, journal path and the actual held sync-lock descriptor. A different
 request, stale plan, changed local file or uncertain earlier phase stops it.
