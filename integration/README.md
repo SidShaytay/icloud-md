@@ -162,7 +162,8 @@ the [CloudKit records/modify request contract](https://developer.apple.com/libra
 using one as a retry of the other. Server-side atomicity and operation order do
 not establish native import order. The separate A/B trial passed with a connected
 Mac but left its list title stale when Notes was closed during the writes and
-reopened afterward; BA remains a diagnostic candidate, not a proven replacement.
+reopened afterward. The BA trial also imported both latest versions while leaving
+the list title one rename behind; neither metadata-only sequence is a supported fix.
 
 The alternative `BD` phase tests a content-neutral causal revision. It computes
 the new document internally by inserting then deleting only a fresh trailing
@@ -175,6 +176,15 @@ drawing/preview bytes and references must remain identical. `B`, `BA` and `BD`
 share a terminal claim and cannot be used to retry each other. Native rendering
 and the preservation of an unseen client-local newline still require external
 verification; this diagnostic is not a supported rename fix.
+
+The first BD trial updated the native title but duplicated the drawing because
+the document codec confused timestamp-row indexes with sorted UUID ranks. Both
+character and style references now translate through sorted UUID rank at the wire
+boundary, with independent wire-identity regressions. The failed trial requires a
+forward causal repair of its accidental atom; correcting the codec alone does not
+delete copies already merged by a client. Do not replay its journal or restore an
+older raw document. A corrected BD trial and native preservation checks are still
+required before enabling a production rename path.
 
 The checked experimental caller is `attachmentTitleRunner.ts`, launched through
 `integration/runAttachmentTitleProbe` on Linux. It verifies the unchanged local
