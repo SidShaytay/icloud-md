@@ -419,3 +419,36 @@ test("vault writer excludes inherited-lock siblings through state bookkeeping an
  await entered;try{await assert.rejects(other.withVaultWriter(async()=>{cloneStateWrites++;}),/writer|lock/i);assert.equal(cloneStateWrites,0);}finally{release();}
  await running;assert.equal(cloneStateWrites,1);assert.deepEqual(await f.ledger.listNoteIds(),[noteId.toUpperCase()]);
 }));
+
+
+test("ledger keys compare UUIDs case-insensitively while dispatch preserves observed CloudKit record names", () => fixture(async f => {
+  const lowerNote = "aaaaaaaa-1111-4111-8111-111111111111", lowerAttachment = "bbbbbbbb-2222-4222-8222-222222222222", lowerFolder = "cccccccc-3333-4333-8333-333333333333";
+  let entry = await f.ledger.register({ ...intent, noteId: lowerNote, attachmentId: lowerAttachment, folderId: lowerFolder });
+  assert.equal(entry.intent.noteId, lowerNote); assert.equal(entry.intent.attachmentId, lowerAttachment); assert.equal(entry.intent.folderId, lowerFolder);
+  assert.deepEqual(await f.ledger.read(lowerNote.toUpperCase()), entry);
+  assert.deepEqual(await f.ledger.listNoteIds(), [lowerNote]);
+  const first = await f.ledger.claim(lowerNote.toUpperCase(), { expectedRevision: entry.revision, observation: observation() });
+  assert.equal(first.dispatch!.recordName, lowerAttachment);
+  entry = await f.ledger.acknowledge(lowerNote, { expectedRevision: first.entry.revision, token: first.dispatch!.token,
+    observation: observation({ attachmentTag: "attachment-2", attachmentTitle: intent.targetTitle }) });
+  const second = await f.ledger.claim(lowerNote, { expectedRevision: entry.revision,
+    observation: observation({ attachmentTag: "attachment-2", attachmentTitle: intent.targetTitle }) });
+  assert.equal(second.dispatch!.recordName, lowerNote);
+}));
+
+test("identities differing only in UUID casing cannot overlap note and attachment roles", () => fixture(async f => {
+  const lowerNote = "aaaaaaaa-1111-4111-8111-111111111111";
+  await assert.rejects(f.ledger.register({ ...intent, noteId: lowerNote, attachmentId: lowerNote.toUpperCase() }), /Overlapping/);
+}));
+
+
+test("alternate UUID spelling cannot restart the same acknowledged rename phase", () => fixture(async f => {
+  const lower = { ...intent, noteId: "aaaaaaaa-1111-4111-8111-111111111111", attachmentId: "bbbbbbbb-2222-4222-8222-222222222222", folderId: "cccccccc-3333-4333-8333-333333333333" };
+  let entry = await f.ledger.register(lower);
+  const claim = await f.ledger.claim(lower.noteId, { expectedRevision: entry.revision, observation: observation() });
+  entry = await f.ledger.acknowledge(lower.noteId, { expectedRevision: claim.entry.revision, token: claim.dispatch!.token,
+    observation: observation({ attachmentTag: "attachment-2", attachmentTitle: intent.targetTitle }) });
+  assert.equal(entry.stage, "note");
+  const same = await f.ledger.register({ ...lower, noteId: lower.noteId.toUpperCase(), attachmentId: lower.attachmentId.toUpperCase(), folderId: lower.folderId.toUpperCase() }, { expectedRevision: entry.revision });
+  assert.deepEqual(same, entry);
+}));
