@@ -94,6 +94,19 @@ function snapshot(records: CloudKitRecord[]): string {
   return JSON.stringify(records.map(record => stable({ ...record, fields: Object.fromEntries(Object.entries(record.fields).map(([key, field]) => [key, { ...field, value: stable(field.value, ["ASSETID", "ASSETID_LIST"].includes(field.type)) }])) })));
 }
 
+/** Bounded record validation and fingerprints without downloading asset bytes.
+ * Titles/date are checked separately against the lease's phase-specific state. */
+export function inspectDrawingRecords(records: CloudKitRecord[], scope: DrawingCaptureScope) {
+  const checked = checkRecords(records, scope), assets = inventory(checked.records);
+  const immutable = checked.records.map(({ recordChangeTag, modified, ...record }) => ({ ...record,
+    fields: Object.fromEntries(Object.entries(record.fields).filter(([key]) => !(record.recordType === "Note" ? ["TitleEncrypted", "ModificationDate"] : ["UserTitle"]).includes(key))),
+  }));
+  return { records: checked.records, documentSha256: sha(checked.document),
+    assetRefsSha256: sha(JSON.stringify(assets.map(asset => [asset.field, stable(asset.value, true)]))),
+    protectedSha256: sha(snapshot(immutable)),
+  };
+}
+
 async function download(asset: Asset, request: typeof fetch): Promise<Buffer> {
   try {
     const response = await request(asset.url, { method: "GET", redirect: "error", signal: AbortSignal.timeout(30_000) });
