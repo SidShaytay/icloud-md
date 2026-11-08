@@ -180,11 +180,11 @@ verification; this diagnostic is not a supported rename fix.
 The first BD trial updated the native title but duplicated the drawing because
 the document codec confused timestamp-row indexes with sorted UUID ranks. Both
 character and style references now translate through sorted UUID rank at the wire
-boundary, with independent wire-identity regressions. The failed trial requires a
-forward causal repair of its accidental atom; correcting the codec alone does not
+boundary, with independent wire-identity regressions. The accidental atom was removed by a verified forward causal repair; correcting
+the codec alone does not
 delete copies already merged by a client. Do not replay its journal or restore an
 older raw document. The corrected BD trial preserved
-the document but still left the native title one rename behind after closed-client
+visible content and formatting but still left the native title one rename behind after closed-client
 catch-up; it is rejected as an end-to-end rename fix.
 
 The `BR` alternative tests a physical character replacement. It uses the ordinary
@@ -194,13 +194,23 @@ Only the final one-drawing document is uploaded. The fresh character precedes th
 old tombstone, retaining unseen native descendants such as a local trailing newline.
 Character coordinates, the old character's style timestamp and causal document bytes
 change intentionally; asset bytes, references and note identity must not change.
-All four terminal alternatives share a durable claim. This remains a diagnostic
-until native title refresh and preservation have been verified.
+All four terminal alternatives share a durable claim. The closed-client BR trial
+preserved the drawing, formatting, unrelated history and local newline, but the
+native title still stayed one rename behind. It is rejected as a rename fix.
+
+A later one-shot Linux reassertion of **only** the already-current Note title
+advanced the cloud version and, after a subsequent native fetch, corrected the
+name. The modification date, compressed document and all five assets were unchanged.
+This supports investigating ongoing Linux reconciliation; it does not prove a
+finite completed rename will work for a device that remains offline until afterward.
+No periodic reassertion service is installed, and unproven workflows are not
+exposed through the shipped CLI. The internal push coordinator remains a research
+seam tested against the offline SDK, not an end-to-end fix.
 
 The checked experimental caller is `attachmentTitleRunner.ts`, launched through
 `integration/runAttachmentTitleProbe` on Linux. It verifies the unchanged local
 filename request, account/private-folder scope, exact expected compressed document
-(including the explicitly planned revision for BD), and all drawing/preview bytes.
+(including the explicitly planned revision for BD or BR), and all drawing/preview bytes.
 It captures private evidence before and after a
 write. Its approved preview digest binds those inputs, executable source,
 deadline, journal path and the actual held sync-lock descriptor. A different

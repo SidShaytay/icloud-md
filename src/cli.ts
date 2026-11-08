@@ -3,7 +3,6 @@ import chalk from "chalk";
 import cliProgress from "cli-progress";
 import { Command, CommanderError } from "commander";
 import ora from "ora";
-import path from "node:path";
 import { BROWSER_EXECUTABLE_ENV, installChromium, resolveBrowserExecutable } from "./auth/browserLogin.js";
 import { reauthenticateFolder, resolveFolderAccount } from "./auth/folderAuth.js";
 import { DISCLOSURE_WARNING, parseSinceDuration, runBugReport, runBugReportIdentify } from "./commands/bugReport.js";
@@ -369,13 +368,10 @@ program
       'places. Run "status" first to see exactly what push will do, including anything it would refuse.',
   )
   .option("--dry-run", "report what would be pushed without changing anything")
-  .option("--experimental-drawing-titles <directory>", "opt in to guarded drawing retitles with a causal CRDT revision; save evidence in this private directory outside the vault")
-  .action(async (directory: string | undefined, opts: { dryRun?: boolean; experimentalDrawingTitles?: string }, command: Command) => {
+  .action(async (directory: string | undefined, opts: { dryRun?: boolean }, command: Command) => {
     const context = contextFor(command);
     const targetDir = await resolveTargetDir(directory);
-    const result = await runPush(targetDir, { dryRun: opts.dryRun === true, onLoginStatus: makeStatusSink(context),
-      ...(opts.experimentalDrawingTitles ? { attachmentTitleRenames: { journalDirectory: path.resolve(opts.experimentalDrawingTitles) } } : {}),
-    });
+    const result = await runPush(targetDir, { dryRun: opts.dryRun === true, onLoginStatus: makeStatusSink(context) });
     emitResult(context, result, (r) => {
       printNotices(r.notices);
       for (const entry of r.entries) {

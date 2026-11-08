@@ -102,8 +102,7 @@ test("install-browser is a listed command", async () => {
   assert.match(stdout, /bundled sign-in browser/);
 });
 
-test("drawing title renames require an explicit experimental private-journal option", async () => {
+test("unverified drawing-title workflows are not exposed by the CLI", async () => {
   const { stdout } = await runCli(["push", "--help"]);
-  assert.match(stdout, /--experimental-drawing-titles <directory>/);
-  assert.match(stdout, /causal|CRDT/);
+  assert.doesNotMatch(stdout, /--experimental-drawing-titles/);
 });

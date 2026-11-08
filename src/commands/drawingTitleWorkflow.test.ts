@@ -57,7 +57,7 @@ function drawingRecord(title = "Original drawing"): CloudKitRecord {
   };
 }
 
-test("experimental ordinary push supports two successive drawing filenames without document/asset echoes", async () => {
+test("offline SDK workflow tracks successive drawing filenames and leaves the next push clean", async () => {
     const vault = await mkdtemp(path.join(home, "vault-"));
     const record = drawingRecord();
     const drawing: CloudKitRecord = { recordName: attachmentId, recordType: "Attachment", recordChangeTag: "drawing-a", parentRecordName: noteId, fields: {

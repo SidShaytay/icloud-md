@@ -1,4 +1,4 @@
-/** Experimental CloudKit-only title phases. Not imported by the shipped CLI.
+/** Research CloudKit-only title phases. Not enabled by the shipped CLI.
  * A cloud readback is not proof that native note lists have refreshed.
  * Before live use, the caller must independently verify private-note scope,
  * capture asset bytes, preserve the unchanged local rename intent and exclude

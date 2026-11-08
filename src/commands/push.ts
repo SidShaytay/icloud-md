@@ -106,7 +106,8 @@ export interface PushOptions {
   dryRun?: boolean;
   /** Routes any headless-recovery login status messages; defaults to staying silent (see `resolveFolderAccount`). */
   onLoginStatus?: (message: string) => void;
-  /** Explicit experimental opt-in; omitted by default. Evidence must be private
+  /** Research-harness opt-in, not exposed by the CLI while native title tests fail.
+   * Omitted by default. Evidence must be private
    * and outside the vault. Requires an inherited exclusive normal-sync lock. */
   attachmentTitleRenames?: { journalDirectory: string };
 }

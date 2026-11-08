@@ -1,4 +1,5 @@
-/** Guarded Linux-only coordinator. Default push does not enable this workflow.
+/** Research Linux-only coordinator, not exposed by the CLI while native closed-
+ * client title verification fails. Default push does not enable this workflow.
  * All operations remain native-unverified; no native device is contacted. */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
