@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { create, toBinary } from "@bufbuild/protobuf";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { AttachmentInfoSchema, AttributeRunSchema, ParagraphStyleSchema } from "../src/notes/gen/topotext_pb.js";
+import { AttachmentInfoSchema, AttributeRunSchema, ParagraphStyleSchema, StringSchema } from "../src/notes/gen/topotext_pb.js";
 import { buildInitialNoteDocument, encodeNoteDocument, noteDocumentRoundTrips, parseNoteDocument, validateDocumentInvariants } from "../src/notes/noteDocument.js";
 import { compressNoteDocument, decompressNoteDocument } from "../src/notes/noteText.js";
+import { DocumentSchema } from "../src/notes/gen/versioned_document_pb.js";
 import { buildAttachmentTitleRevision, validateAttachmentTitleRevision } from "./attachmentTitleRevision.js";
 
 const seed = "a".repeat(64), attachmentId = "11111111-1111-4111-8111-111111111111";
@@ -102,4 +103,27 @@ test("an orphan dead atom cannot pass the causal revision contract", () => {
   after.runs[1]!.sequence = [sentinel]; // Bypass the new dead atom, leaving it orphaned.
   validateDocumentInvariants(after);
   assert.throws(() => validateAttachmentTitleRevision(before, after, after.replicas.at(-1)!.id), /connected|incoming|edge/i);
+});
+
+// Read the wire independently of the domain codec. A self-roundtrip can hide
+// an encoder and decoder that share the same mistaken replica interpretation.
+test("revision preserves physical drawing identity when the new UUID sorts before its author", () => {
+  const original = fixture(); original.replicas[0]!.id = new Uint8Array(16).fill(0xfe);
+  const compressed = compressNoteDocument(encodeNoteDocument(original));
+  const result = buildAttachmentTitleRevision(compressed, seed);
+  const wrapper = fromBinary(DocumentSchema, decompressNoteDocument(result.compressed));
+  const wire = fromBinary(StringSchema, wrapper.version[0]!.data);
+  const sorted = wire.timestamp!.clock.map(row => row.replicaUUID).sort(Buffer.compare);
+  assert.equal(Buffer.compare(sorted[0]!, original.replicas[0]!.id), -1, "fixture must force ranks to change");
+  const identity = (rank: number) => Buffer.from(sorted[rank - 1]!).toString("hex");
+  const originalId = Buffer.from(original.replicas[0]!.id).toString("hex");
+  const live = wire.substring.filter(run => run.length > 0 && run.tombstone !== 1);
+  assert.equal(live.length, 1);
+  assert.equal(identity(live[0]!.charID!.replicaID), originalId);
+  assert.equal(identity(live[0]!.timestamp!.replicaID), originalId);
+  const added = wire.substring.filter(run => run.length > 0 && run.tombstone === 1);
+  assert.equal(added.length, 1);
+  assert.notEqual(identity(added[0]!.charID!.replicaID), originalId);
+  assert.equal(identity(added[0]!.charID!.replicaID), identity(added[0]!.timestamp!.replicaID));
+  assert.deepEqual(wire.attributeRun.map(run => toBinary(AttributeRunSchema, run)), original.attributeRuns.map(run => toBinary(AttributeRunSchema, run)));
 });
