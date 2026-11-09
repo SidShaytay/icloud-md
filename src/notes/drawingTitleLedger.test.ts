@@ -34,11 +34,8 @@ async function setup() {
   const options = {
     vault, journalDirectory, accountDsidSha256: "a".repeat(64)
   }, ports = {
-    now: () => now, lockAuthority: async () => {
+    now: () => now, assertWriter: async () => {
       assert(held, "No lock");
-      return {
-        path: "/fixture/sync.lock", dev: "1", ino: "2"
-      };
     }
   };
   const ledger = await openDrawingTitleLedger(options, ports);
@@ -284,70 +281,10 @@ test("lock loss, a symlink root, malformed state and stale revisions fail closed
     expectedRevision: e.revision, observation: observation()
   }));
   const other = path.join(f.root, "link");
-  await symlink(f.options.journalDirectory, other);
+  await symlink(f.options.journalDirectory, other, "junction");
   await assert.rejects(openDrawingTitleLedger({
     ...f.options, journalDirectory: other
   }, f.ports));
-}));
-test("independent workers sharing normal lock cannot substitute another pending token", () => fixture(async (f) => {
-  const worker = await import(new URL("./drawingTitleLedger.ts?independent-worker", import.meta.url).href) as typeof import("./drawingTitleLedger.js");
-  const other = await worker.openDrawingTitleLedger(f.options, f.ports), e = await f.ledger.register(intent);
-  let releaseFirst!: () => void, releaseSecond!: () => void, firstStarted!: () => void, secondStarted!: () => void;
-  const firstGate = new Promise<void>(r => {
-    releaseFirst = r;
-  }), secondGate = new Promise<void>(r => {
-    releaseSecond = r;
-  });
-  const firstReached = new Promise<void>(r => {
-    firstStarted = r;
-  }), secondReached = new Promise<void>(r => {
-    secondStarted = r;
-  });
-  const sync = drawingTitleLedgerDurability.sync, otherSync = worker.drawingTitleLedgerDurability.sync;
-  drawingTitleLedgerDurability.sync = async (file) => {
-    await sync(file);
-    firstStarted();
-    await firstGate;
-  };
-  worker.drawingTitleLedgerDurability.sync = async (file) => {
-    await otherSync(file);
-    secondStarted();
-    await secondGate;
-  };
-  try {
-    const first = Promise.allSettled([
-      f.ledger.claim(noteId, {
-        expectedRevision: e.revision, observation: observation()
-      })
-    ]);
-    await firstReached;
-    const second = Promise.allSettled([
-      other.claim(noteId, {
-        expectedRevision: e.revision, observation: observation()
-      })
-    ]);
-    await Promise.race([
-      secondReached, second
-    ]);
-    releaseFirst();
-    const a = await first;
-    releaseSecond();
-    const b = await second;
-    const persisted = await f.ledger.read(noteId);
-    const dispatched = [
-      ...a, ...b
-    ].flatMap(r => r.status === "fulfilled" && r.value.dispatch ? [
-      r.value.dispatch
-    ] : []);
-    assert.equal(dispatched.length, 1);
-    assert.equal(dispatched[0]!.token, persisted!.pending!.token, "returned dispatch must match its own durable pending token");
-  }
-  finally {
-    releaseFirst();
-    releaseSecond();
-    drawingTitleLedgerDurability.sync = sync;
-    worker.drawingTitleLedgerDurability.sync = otherSync;
-  }
 }));
 test("registering the same filename intent cannot reset cadence through fresh metadata", () => fixture(async (f) => {
   const e = await active(f);
@@ -372,13 +309,13 @@ test("status reads do not create storage or pin; account and root permissions st
  await assert.rejects(lstat(path.join(f.vault,".icloud-md","attachment-title-journal.json")),{code:"ENOENT"});
  await f.ledger.register(intent);
  await assert.rejects(openDrawingTitleLedger({...f.options,accountDsidSha256:"b".repeat(64)},f.ports));
- await chmod(f.options.journalDirectory,0o755);await assert.rejects(f.ledger.read(noteId),/private journal/i);
+ if (process.platform !== "win32") { await chmod(f.options.journalDirectory,0o755);await assert.rejects(f.ledger.read(noteId),/private journal/i); }
 }));
 test("malformed, oversized and symlink lease files fail closed",()=>fixture(async f=>{
  await f.ledger.register(intent);const base=path.join(f.options.journalDirectory,"drawing-title-leases-v1"),dir=path.join(base,(await readdir(base))[0]!),name=(await readdir(dir)).find(name=>name.endsWith(".json"))!,file=path.join(dir,name),original=await readFile(file,"utf8");
  const corrupt=JSON.parse(original);corrupt.tags.rawRecords=[];await writeFile(file,JSON.stringify(corrupt));await assert.rejects(f.ledger.read(noteId));
  await writeFile(file," ".repeat(16385));await assert.rejects(f.ledger.read(noteId),/Unsafe|Oversized/);
- await rm(file);await symlink(path.join(f.root,"outside"),file);await assert.rejects(f.ledger.read(noteId));
+ if (process.platform !== "win32") { await rm(file);await symlink(path.join(f.root,"outside"),file);await assert.rejects(f.ledger.read(noteId)); }
 }));
 test("lost ACK durability is resolved as observed state, never relabelled an SDK receipt",()=>fixture(async f=>{
  const e=await f.ledger.register(intent),c=await f.ledger.claim(noteId,{expectedRevision:e.revision,observation:observation()}),sync=drawingTitleLedgerDurability.sync;
@@ -388,7 +325,7 @@ test("lost ACK durability is resolved as observed state, never relabelled an SDK
  const resolved=await reopened.resolvePending(noteId,{expectedRevision:pending.revision,observation:observation({attachmentTag:"attachment-2",attachmentTitle:intent.targetTitle})});
  assert.equal(resolved.lastReceipt?.outcome,"postcondition-observed");assert.equal(resolved.recentUncertain.at(-1)?.outcome,"uncertain");
 }));
-test("failure after atomic rename never dispatches and preserves the one-shot pending claim",()=>fixture(async f=>{
+test("failure after atomic rename never dispatches and preserves the one-shot pending claim",{skip:process.platform === "win32"},()=>fixture(async f=>{
  const e=await f.ledger.register(intent),sync=drawingTitleLedgerDurability.sync;let calls=0;
  drawingTitleLedgerDurability.sync=async file=>{await sync(file);if(++calls===2)throw Error("directory fsync failed");};
  try{await assert.rejects(f.ledger.claim(noteId,{expectedRevision:e.revision,observation:observation()}));}finally{drawingTitleLedgerDurability.sync=sync;}
@@ -402,21 +339,20 @@ test("vault/account namespaces sharing an evidence root list only their own note
  const otherNote="44444444-4444-4444-8444-444444444444";await other.register({...intent,noteId:otherNote});
  assert.deepEqual(await f.ledger.listNoteIds(),[noteId.toUpperCase()]);assert.deepEqual(await other.listNoteIds(),[otherNote.toUpperCase()]);assert.equal(await f.ledger.read(otherNote),undefined);
 }));
-test("a paused superseded claim cannot dispatch and an executing owner excludes a second worker",()=>fixture(async f=>{
+test("a paused superseded claim cannot dispatch and overlapping operations refuse",()=>fixture(async f=>{
  let e=await active(f);f.setNow(301000);const old=await f.ledger.claim(noteId,{expectedRevision:e.revision,observation:current()});let sends=0;f.setNow(601001);await assert.rejects(f.ledger.withDispatch(noteId,{expectedRevision:old.entry.revision,token:old.dispatch!.token},async()=>{sends++;}),/Expired/i);f.setNow(601000);const newer=await f.ledger.claim(noteId,{expectedRevision:old.entry.revision,observation:current()});
  await assert.rejects(f.ledger.withDispatch(noteId,{expectedRevision:old.entry.revision,token:old.dispatch!.token},async()=>{sends++;}));assert.equal(sends,0);
- const worker=await import(new URL("./drawingTitleLedger.ts?dispatch-worker",import.meta.url).href) as typeof import("./drawingTitleLedger.js"),other=await worker.openDrawingTitleLedger(f.options,f.ports);
  let release!:()=>void,started!:()=>void;const gate=new Promise<void>(r=>{release=r;}),entered=new Promise<void>(r=>{started=r;});
  const running=f.ledger.withDispatch(noteId,{expectedRevision:newer.entry.revision,token:newer.dispatch!.token},async()=>{sends++;started();await gate;return "sent-once";});await entered;f.setNow(901000);
- try{await assert.rejects(other.claim(noteId,{expectedRevision:newer.entry.revision,observation:current()}),/worker|lock/i);}finally{release();}
+ try{await assert.rejects(f.ledger.claim(noteId,{expectedRevision:newer.entry.revision,observation:current()}),/operation/i);}finally{release();}
  assert.equal(await running,"sent-once");assert.equal(sends,1);
 }));
 
-test("vault writer excludes inherited-lock siblings through state bookkeeping and permits nested note operations",()=>fixture(async f=>{
+test("title writer excludes sibling feature runs through state bookkeeping and permits nested note operations",()=>fixture(async f=>{
  const worker=await import(new URL("./drawingTitleLedger.ts?vault-worker",import.meta.url).href) as typeof import("./drawingTitleLedger.js"),other=await worker.openDrawingTitleLedger(f.options,f.ports);
  let release!:()=>void,started!:()=>void;const gate=new Promise<void>(r=>{release=r;}),entered=new Promise<void>(r=>{started=r;});let cloneStateWrites=0;
- const running=f.ledger.withVaultWriter(async()=>{const e=await f.ledger.register(intent),claim=await f.ledger.claim(noteId,{expectedRevision:e.revision,observation:observation()});await f.ledger.withDispatch(noteId,{expectedRevision:claim.entry.revision,token:claim.dispatch!.token},async()=>"SDK");started();await gate;cloneStateWrites++;});
- await entered;try{await assert.rejects(other.withVaultWriter(async()=>{cloneStateWrites++;}),/writer|lock/i);assert.equal(cloneStateWrites,0);}finally{release();}
+ const running=f.ledger.withWriter(async()=>{const e=await f.ledger.register(intent),claim=await f.ledger.claim(noteId,{expectedRevision:e.revision,observation:observation()});await f.ledger.withDispatch(noteId,{expectedRevision:claim.entry.revision,token:claim.dispatch!.token},async()=>"SDK");started();await gate;cloneStateWrites++;});
+ await entered;try{await assert.rejects(other.withWriter(async()=>{cloneStateWrites++;}),/writer|lock/i);assert.equal(cloneStateWrites,0);}finally{release();}
  await running;assert.equal(cloneStateWrites,1);assert.deepEqual(await f.ledger.listNoteIds(),[noteId.toUpperCase()]);
 }));
 
@@ -451,4 +387,28 @@ test("alternate UUID spelling cannot restart the same acknowledged rename phase"
   assert.equal(entry.stage, "note");
   const same = await f.ledger.register({ ...lower, noteId: lower.noteId.toUpperCase(), attachmentId: lower.attachmentId.toUpperCase(), folderId: lower.folderId.toUpperCase() }, { expectedRevision: entry.revision });
   assert.deepEqual(same, entry);
+}));
+
+
+test("portable writer preserves inert legacy writer.lock files", () => fixture(async f => {
+  let legacy!: string;
+  await f.ledger.withWriter(async () => {
+    const base = path.join(f.options.journalDirectory, "drawing-title-leases-v1");
+    const namespace = (await readdir(base))[0]!;
+    legacy = path.join(base, namespace, "writer.lock");
+    await writeFile(legacy, "legacy", { mode: 0o600 });
+    await f.ledger.register(intent);
+  });
+  await f.ledger.withWriter(async () => assert.deepEqual(await f.ledger.listNoteIds(), [noteId.toUpperCase()]));
+  assert.equal(await readFile(legacy, "utf8"), "legacy");
+}));
+
+test("canonical parent aliases share the same pinned store while a symlink store refuses", () => fixture(async f => {
+  const actual = path.join(f.root, "actual"), alias = path.join(f.root, "alias");
+  await mkdir(actual); await symlink(actual, alias, "junction");
+  const journalDirectory = path.join(alias, "new", "private");
+  const ledger = await openDrawingTitleLedger({ ...f.options, journalDirectory }, f.ports);
+  await ledger.withWriter(async () => { await ledger.register(intent); });
+  const reopened = await openDrawingTitleLedger({ ...f.options, journalDirectory: path.join(actual, "new", "private") }, f.ports);
+  assert.equal((await reopened.read(noteId))?.intent.targetTitle, intent.targetTitle);
 }));

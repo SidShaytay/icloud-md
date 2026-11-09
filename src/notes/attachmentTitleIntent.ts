@@ -1,4 +1,4 @@
-/** Shared Linux/cloud authority checks for unchanged drawing filename renames. */
+/** Shared local/cloud authority checks for unchanged drawing filename renames. */
 import assert from "node:assert/strict";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
