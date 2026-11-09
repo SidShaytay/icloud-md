@@ -233,7 +233,10 @@ test("an escaped execution paused in lookup cannot send after its scope closes",
   let executing!: Promise<Awaited<ReturnType<Awaited<ReturnType<typeof prepareDrawingTitleReconciliation>>["execute"]>>>;
   await ledger.withWriter(async () => {
     const plan = await prepareDrawingTitleReconciliation({ ...f.options, ledger, io }, f.ports);
-    pause = true; executing = plan.execute(); await entered;
+    pause = true; executing = plan.execute();
+    await Promise.race([entered, executing.then(result => {
+      throw Error(`Execution completed before reaching the paused lookup (${result.status})`);
+    })]);
   });
   resume();
   assert.equal((await executing).status, "uncertain");
