@@ -64,9 +64,8 @@ import { historyRecordNames } from "../notes/trackedFile.js";
 import { recordVersion } from "../notes/versionHistory.js";
 import { createDrawingTitleIO } from "../notes/drawingTitleCloud.js";
 import { readAttachmentTitleIntent } from "../notes/attachmentTitleIntent.js";
-import { getAttachmentTitleLockAuthority } from "../notes/attachmentTitleLock.js";
 import { openDrawingTitleLedger, type DrawingTitleLeaseEntry } from "../notes/drawingTitleLedger.js";
-import { drawingTitleInScope, prepareDrawingTitleReconciliation, DrawingTitleReconciliationUnavailable, type DrawingTitleReconciliationConfig } from "../notes/drawingTitleReconciliation.js";
+import { drawingTitleInScope, prepareDrawingTitleReconciliation, DrawingTitleReconciliationUnavailable, type DrawingTitleReconciliationConfig, type DrawingTitleLedger } from "../notes/drawingTitleReconciliation.js";
 import { applyLocalNoteDeletion, isInTrash, isPurged, rememberTrashedNote } from "./delete.js";
 import {
   applyTextEdit,
@@ -110,7 +109,7 @@ export interface PushOptions {
   dryRun?: boolean;
   /** Routes any headless-recovery login status messages; defaults to staying silent (see `resolveFolderAccount`). */
   onLoginStatus?: (message: string) => void;
-  /** Opt-in ongoing metadata-only Linux reconciliation, driven by later push
+  /** Opt-in ongoing metadata-only reconciliation, driven by later push
    * cycles. It does not claim that offline native devices have finished. */
   drawingTitleReconciliation?: DrawingTitleReconciliationConfig;
 }
@@ -118,7 +117,6 @@ export interface PushOptions {
 async function reconciliationLedger(targetDir: string, state: CloneState, config: DrawingTitleReconciliationConfig) {
   if (state.titleMode !== "filename" || !state.account?.dsid) throw Error("Drawing title reconciliation requires an account-bound filename-title vault");
   for (const ids of [config.folderIds, config.noteIds]) if (ids !== undefined && (ids.length > 256 || !ids.every(isNoteId))) throw Error("Invalid drawing title reconciliation scope");
-  await getAttachmentTitleLockAuthority();
   return openDrawingTitleLedger({ vault: targetDir, journalDirectory: config.journalDirectory, accountDsidSha256: createHash("sha256").update(state.account.dsid).digest("hex") });
 }
 
@@ -238,14 +236,20 @@ export interface BuildPushPlanResult {
  */
 export async function buildPushPlan(
   targetDir: string,
-  options: { onLoginStatus?: ((message: string) => void) | undefined; drawingTitleReconciliation?: PushOptions["drawingTitleReconciliation"] } = {},
+  options: { onLoginStatus?: ((message: string) => void) | undefined; drawingTitleReconciliation?: PushOptions["drawingTitleReconciliation"]; titleLedger?: DrawingTitleLedger } = {},
 ): Promise<BuildPushPlanResult> {
   const state = await openVault(targetDir, migrationReporter(options.onLoginStatus));
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }
   const titleConfig = options.drawingTitleReconciliation;
-  const titleLedger = titleConfig ? await reconciliationLedger(targetDir, state, titleConfig) : undefined;
+  const titleLedger = options.titleLedger ?? (titleConfig ? await reconciliationLedger(targetDir, state, titleConfig) : undefined);
+  const assertTitleWriter = titleLedger?.writerGuard();
+  const finishPlan = (): BuildPushPlanResult => ({ state, notices, entries: entries.map(entry => {
+    if (!entry.execute || !assertTitleWriter) return entry;
+    const execute = entry.execute;
+    return { ...entry, execute: async () => { await assertTitleWriter(); return execute(); } };
+  }) });
 
   // Before any path is read as evidence of anything: a file a
   // `--defer-renames` consumer has already moved is not a mystery move to be
@@ -851,7 +855,7 @@ export async function buildPushPlan(
     createCandidates.length === 0 &&
     readyMovePairs.length === 0 && dueTitleLeases.length === 0
   ) {
-    return { state, entries, notices };
+    return finishPlan();
   }
 
   const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: options.onLoginStatus });
@@ -1001,7 +1005,7 @@ export async function buildPushPlan(
         const plan = await prepareDrawingTitleReconciliation({ vault: targetDir, file: pair.toFile, noteId: pair.recordName, attachmentId, folderId: pair.folderRecordName,
           expectedNoteTag: pair.entry.recordChangeTag, io, ledger: titleLedger, kind: "rename" });
         entries.push({ ...base, resolution: "ready", ...(plan.localOnly ? { localOnly: true } : {}),
-          remark: "metadata-only rename with ongoing Linux title reconciliation; offline devices may need later sync cycles",
+          remark: "metadata-only rename with ongoing title reconciliation; offline devices may need later sync cycles",
           execute: async () => {
             const outcome = await plan.execute();
             if (outcome.status !== "active-native-unverified" || !outcome.note) return { succeeded: false, message: `${pair.toFile}: title reconciliation ${outcome.status === "cancelled" ? "stopped after a conflicting change" : "remains uncertain; no blind retry"}` };
@@ -1010,7 +1014,7 @@ export async function buildPushPlan(
             state.notes[pair.recordName] = { ...pair.entry, file: pair.toFile, folderRecordName: pair.folderRecordName, frontmatterTitle: pair.recordedTitle,
               recordChangeTag: current.recordChangeTag!, modificationDate: modificationDateOf(current) };
             await applyNoteFileTimes(path.join(targetDir, pair.toFile), current);
-            return { succeeded: true, message: `Renamed ${pair.entry.file} -> ${pair.toFile}; ongoing Linux title reconciliation remains active` };
+            return { succeeded: true, message: `Renamed ${pair.entry.file} -> ${pair.toFile}; ongoing title reconciliation remains active` };
           },
         });
       } catch { entries.push({ ...base, reason: "drawing-title reconciliation could not validate this unchanged filename intent; no title write was planned" }); }
@@ -1531,7 +1535,7 @@ export async function buildPushPlan(
     await writeCloneState(targetDir, state);
   }
 
-  return { state, entries, notices };
+  return finishPlan();
 }
 
 /**
@@ -1619,14 +1623,14 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
     const state = await readCloneState(targetDir);
     if (!state) throw new NotClonedDirectoryError(targetDir);
     const ledger = await reconciliationLedger(targetDir, state, options.drawingTitleReconciliation);
-    return ledger.withVaultWriter(() => runPushUnlocked(targetDir, options));
+    return ledger.withWriter(() => runPushUnlocked(targetDir, options, ledger));
   }
   return runPushUnlocked(targetDir, options);
 }
 
-async function runPushUnlocked(targetDir: string, options: PushOptions): Promise<PushResult> {
+async function runPushUnlocked(targetDir: string, options: PushOptions, titleLedger?: DrawingTitleLedger): Promise<PushResult> {
   const dryRun = options.dryRun === true;
-  const { state, entries, notices } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus, drawingTitleReconciliation: options.drawingTitleReconciliation });
+  const { state, entries, notices } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus, drawingTitleReconciliation: options.drawingTitleReconciliation, ...(titleLedger ? { titleLedger } : {}) });
   const unchanged = countUnchangedNotes(entries, Object.keys(state.notes).length);
 
   if (entries.length === 0) {

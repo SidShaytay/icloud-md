@@ -58,14 +58,14 @@ async function setup() {
     for (const [key, field] of Object.entries(update.fields)) record.fields[key] = { ...field, type: key === "ModificationDate" ? "TIMESTAMP" : "ENCRYPTED_BYTES" };
     record.recordChangeTag += "+";
   } };
-  const ports: DrawingReconciliationPorts = { lockAuthority: async () => ({ path: "/fixture/sync.lock", dev: "1", ino: "2" }), now: () => now,
+  const ports: DrawingReconciliationPorts = { now: () => now,
     capture: async (scope, lookup) => {
       const records = await lookup([scope.noteId, scope.attachmentId]);
       const result = { records, documentSha256: sha(Buffer.from(records[0]!.fields.TextDataEncrypted!.value as string, "base64")), assets: [{ field: "Attachment.PaperDatabase", size: 3, sha256: "a".repeat(64), contentIdentityHash: "b".repeat(64), referenceIdentityHash: "c".repeat(64) }] };
       return result;
     },
   };
-  const ledger = await openDrawingTitleLedger({ vault, journalDirectory: options.journalDirectory, accountDsidSha256: io.accountDsidSha256 }, { lockAuthority: ports.lockAuthority, now: ports.now });
+  const ledger = await openDrawingTitleLedger({ vault, journalDirectory: options.journalDirectory, accountDsidSha256: io.accountDsidSha256 }, { assertWriter: async () => {}, now: ports.now });
   return { ledger, root, vault, body, file, local, state, cloud, options: { ...options, baseline: structuredClone(cloud.slice(0, 2)), expectedNoteTag: cloud[0]!.recordChangeTag!, io, ledger, kind: "rename" as const }, writes, ports, io, advance: (milliseconds = 300_001) => { now += milliseconds; } };
 }
 
@@ -205,4 +205,37 @@ test("a lost durable dispatch owner never reaches the SDK", () => fixture(async 
   const result = await (await prepareDrawingTitleReconciliation({ ...f.options, ledger }, f.ports)).execute();
   assert.equal(result.status, "uncertain"); assert.equal(f.writes.length, 0);
   assert.equal((await f.ledger.read(noteId))?.pending?.phase, "A");
+}));
+
+
+test("preview and prior-run plans cannot dispatch during a later writer scope", () => fixture(async f => {
+  const ledger = await openDrawingTitleLedger({ vault: f.vault, journalDirectory: f.options.journalDirectory, accountDsidSha256: f.io.accountDsidSha256 }, { now: f.ports.now });
+  const request = { ...f.options, ledger };
+  const preview = await prepareDrawingTitleReconciliation(request, f.ports);
+  let old!: Awaited<ReturnType<typeof prepareDrawingTitleReconciliation>>;
+  await ledger.withWriter(async () => { old = await prepareDrawingTitleReconciliation(request, f.ports); });
+  await ledger.withWriter(async () => {
+    assert.equal((await preview.execute()).status, "uncertain");
+    assert.equal((await old.execute()).status, "uncertain");
+    assert.equal(f.writes.length, 0);
+    assert.equal(await ledger.read(noteId), undefined);
+  });
+}));
+
+test("an escaped execution paused in lookup cannot send after its scope closes", () => fixture(async f => {
+  const ledger = await openDrawingTitleLedger({ vault: f.vault, journalDirectory: f.options.journalDirectory, accountDsidSha256: f.io.accountDsidSha256 }, { now: f.ports.now });
+  let pause = false, resume!: () => void, reached!: () => void;
+  const gate = new Promise<void>(resolve => { resume = resolve; }), entered = new Promise<void>(resolve => { reached = resolve; });
+  const io = { ...f.io, lookup: async (ids: string[]) => {
+    if (pause) { pause = false; reached(); await gate; }
+    return f.io.lookup(ids);
+  } };
+  let executing!: Promise<Awaited<ReturnType<Awaited<ReturnType<typeof prepareDrawingTitleReconciliation>>["execute"]>>>;
+  await ledger.withWriter(async () => {
+    const plan = await prepareDrawingTitleReconciliation({ ...f.options, ledger, io }, f.ports);
+    pause = true; executing = plan.execute(); await entered;
+  });
+  resume();
+  assert.equal((await executing).status, "uncertain");
+  assert.equal(f.writes.length, 0);
 }));

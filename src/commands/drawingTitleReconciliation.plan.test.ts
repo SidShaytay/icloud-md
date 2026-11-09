@@ -1,5 +1,3 @@
-import { openSync, closeSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -120,10 +118,6 @@ test("ongoing SDK workflow settles two filenames and later refreshes only the no
       }
       assert.fail("Unexpected request in offline test: " + url.pathname);
     };
-    const lockPath = path.join(home, "sync.lock"), fd = openSync(lockPath, "a", 0o600);
-    assert.equal(spawnSync("flock", ["-n", "3"], { stdio: ["ignore", "ignore", "pipe", fd] }).status, 0);
-    const oldPath = process.env.ICLOUD_MD_PROBE_LOCK_PATH, oldFd = process.env.ICLOUD_MD_PROBE_LOCK_FD;
-    process.env.ICLOUD_MD_PROBE_LOCK_PATH = lockPath; process.env.ICLOUD_MD_PROBE_LOCK_FD = String(fd);
     try {
       const options = { drawingTitleReconciliation: { journalDirectory: path.join(home, "title-journal"), folderIds: [folderId], noteIds: [noteId] } };
       const status = await runStatus(vault, options);
@@ -154,9 +148,6 @@ test("ongoing SDK workflow settles two filenames and later refreshes only the no
       assert.equal(drawing.fields.UserTitle!.value, record.fields.TitleEncrypted!.value);
       assert.equal(await readFile(path.join(vault, nextFile), "utf8"), composeNoteFile("", body, noteId));
     } finally {
-      closeSync(fd);
-      if (oldPath === undefined) delete process.env.ICLOUD_MD_PROBE_LOCK_PATH; else process.env.ICLOUD_MD_PROBE_LOCK_PATH = oldPath;
-      if (oldFd === undefined) delete process.env.ICLOUD_MD_PROBE_LOCK_FD; else process.env.ICLOUD_MD_PROBE_LOCK_FD = oldFd;
       globalThis.fetch = originalFetch;
       await rm(vault, { recursive: true, force: true });
     }

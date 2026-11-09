@@ -1,17 +1,16 @@
-/** Bounded, private Linux-only metadata lease ledger. A dispatch is returned only
+/** Bounded, private metadata lease ledger. A dispatch is returned only
 * after its unique intent is durable. Cloud postconditions are never SDK ACKs. */
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { lstat, open, readdir, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { isEnoent } from "../fsUtil.js";
 import { isNoteId } from "./noteIdFrontmatter.js";
 import { titleIsRepresentable } from "./titleFilename.js";
 import { titleFromNoteFileName } from "./noteTitleParagraph.js";
-import { getAttachmentTitleLockAuthority } from "./attachmentTitleLock.js";
-import { createPrivateTitleState, privateTitleStateDirectory } from "./drawingTitleStorage.js";
+import { withDrawingTitleWriter } from "./drawingTitleLock.js";
+import { createPrivateTitleState, privateTitleStateDirectory, syncTitleDirectory, titleStatePermissions } from "./drawingTitleStorage.js";
 export const DRAWING_TITLE_REFRESH_INTERVAL_MS = 300000;
 const MAX_BYTES = 16384, MAX_UNCERTAIN = 4;
 export interface DrawingTitleLeaseIntent {
@@ -96,10 +95,10 @@ interface Options {
 }
 interface Ports {
   now(): number;
-  lockAuthority: typeof getAttachmentTitleLockAuthority;
+  assertWriter?: () => Promise<void>;
 }
 export const drawingTitleLedgerDurability = { sync: (file: Awaited<ReturnType<typeof open>>) => file.sync() };
-const defaults: Ports = { now: Date.now, lockAuthority: getAttachmentTitleLockAuthority };
+const defaults: Ports = { now: Date.now };
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable) : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, stable(item)])) : value;
 const json = (value: unknown) => JSON.stringify(stable(value));
@@ -187,16 +186,21 @@ function requestHash(intent: DrawingTitleLeaseIntent, phase: Phase, tags: Tags) 
 async function safeRead(name: string): Promise<string | undefined> {
   let handle;
   try {
-    handle = await open(name, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = await lstat(name);
+    assert.ok(before.isFile() && !before.isSymbolicLink() && titleStatePermissions(before), "Unsafe ledger file");
+    handle = await open(name, constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NOFOLLOW));
+    const after = await handle.stat();
+    assert.ok(after.dev === before.dev && after.ino === before.ino, "Ledger file changed while opening");
   }
   catch (error) {
+    await handle?.close();
     if (isEnoent(error))
       return undefined;
     throw error;
   }
   try {
     const stat = await handle.stat();
-    assert.ok(stat.isFile() && stat.uid === process.getuid?.() && (stat.mode & 0o077) === 0 && stat.size <= MAX_BYTES, "Unsafe ledger file");
+    assert.ok(stat.isFile() && titleStatePermissions(stat) && stat.size <= MAX_BYTES, "Unsafe ledger file");
     const bytes = Buffer.alloc(MAX_BYTES + 1);
     let offset = 0;
     while (offset < bytes.length) {
@@ -212,45 +216,35 @@ async function safeRead(name: string): Promise<string | undefined> {
     await handle.close();
   }
 }
-async function syncDirectory(directory: string) { const handle = await open(directory, "r"); try {
-  await drawingTitleLedgerDurability.sync(handle);
-}
-finally {
-  await handle.close();
-} }
-const locks = new Map<string, Promise<void>>();
-async function serialize<T>(key: string, run: () => Promise<T>): Promise<T> {
-  const previous = locks.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const current = previous.then(() => new Promise<void>(resolve => { release = resolve; }));
-  locks.set(key, current);
-  await previous;
-  await Promise.resolve();
-  try {
-    return await run();
-  }
-  finally {
-    release();
-    if (locks.get(key) === current)
-      locks.delete(key);
+async function canonicalStoreRoot(directory: string): Promise<string> {
+  let parent = path.dirname(directory);
+  const suffix = [path.basename(directory)];
+  for (;;) {
+    try { return path.join(await realpath(parent), ...suffix); }
+    catch (error) {
+      if (!isEnoent(error)) throw error;
+      const next = path.dirname(parent);
+      if (next === parent) throw error;
+      suffix.unshift(path.basename(parent)); parent = next;
+    }
   }
 }
 export async function openDrawingTitleLedger(options: Options, overrides: Partial<Ports> = {}) {
   assert.match(options.accountDsidSha256, /^[a-f0-9]{64}$/);
   assert.ok(path.isAbsolute(options.journalDirectory), "Absolute external journal required");
-  const vault = await realpath(options.vault), root = path.resolve(options.journalDirectory), rel = path.relative(vault, root);
+  const vault = await realpath(options.vault), root = await canonicalStoreRoot(path.resolve(options.journalDirectory)), rel = path.relative(vault, root);
   assert.ok(rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel), "Journal must be outside the vault");
   const ports = { ...defaults, ...overrides }, leasesRoot = path.join(root, "drawing-title-leases-v1"), directory = path.join(leasesRoot, sha(JSON.stringify([vault, options.accountDsidSha256]))), pin = path.join(vault, ".icloud-md", "attachment-title-journal.json");
   const identity = async () => { const stat = await lstat(root, { bigint: true }); return json({ directory: root, accountDsidSha256: options.accountDsidSha256, dev: stat.dev.toString(), ino: stat.ino.toString() }); };
   async function safePaths() {
     let current = path.parse(directory).root;
-    for (const part of directory.split(path.sep).filter(Boolean)) {
+    for (const part of path.relative(current, directory).split(path.sep).filter(Boolean)) {
       current = path.join(current, part);
       try {
         const stat = await lstat(current);
         assert.ok(stat.isDirectory() && !stat.isSymbolicLink(), "Unsafe journal ancestry");
         if (current === root || current === leasesRoot || current === directory)
-          assert.ok(stat.uid === process.getuid?.() && (stat.mode & 0o077) === 0, "Unsafe private journal directory");
+          assert.ok(titleStatePermissions(stat), "Unsafe private journal directory");
       }
       catch (error) {
         if (isEnoent(error))
@@ -259,12 +253,21 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
       }
     }
     const metadata = await lstat(path.dirname(pin));
-    assert.ok(metadata.isDirectory() && !metadata.isSymbolicLink() && metadata.uid === process.getuid?.(), "Unsafe vault metadata directory");
+    assert.ok(metadata.isDirectory() && !metadata.isSymbolicLink() && titleStatePermissions(metadata, false), "Unsafe vault metadata directory");
     const authority = await safeRead(pin);
     if (authority !== undefined)
       assert.equal(authority, await identity(), "Title journal authority changed");
   }
   await safePaths();
+  let activeWriter: (() => Promise<void>) | undefined;
+  const writerGuard = () => activeWriter ?? ports.assertWriter ?? (async () => { throw Error("A current drawing title writer scope is required"); });
+  let operationActive = false;
+  async function operation<T>(run: (assertHeld: () => Promise<void>) => Promise<T>): Promise<T> {
+    const assertHeld = writerGuard(); await assertHeld();
+    assert.ok(!operationActive, "Another drawing title operation is running");
+    operationActive = true;
+    try { return await run(assertHeld); } finally { operationActive = false; }
+  }
   const name = (noteId: string) => { assert.ok(isNoteId(noteId)); return path.join(directory, sha(JSON.stringify([vault, options.accountDsidSha256, noteId.toUpperCase()])) + ".json"); };
   async function readUnlocked(noteId: string) { await safePaths(); const raw = await safeRead(name(noteId)); if (raw === undefined)
     return undefined; const entry = JSON.parse(raw) as DrawingTitleLeaseEntry; validEntry(entry); assert.equal(entry.intent.noteId.toUpperCase(), noteId.toUpperCase(), "Wrong ledger note"); return entry; }
@@ -278,25 +281,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     else
       assert.equal(existing, wanted, "Title journal authority changed");
   }
-  async function kernelLock(file: string) {
-    await storage();
-    const handle = await open(file, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
-    try {
-      const stat = await handle.stat();
-      assert.ok(stat.isFile() && stat.uid === process.getuid?.() && (stat.mode & 0o077) === 0, "Unsafe note lease lock");
-      // Separate open descriptions exclude sibling workers that inherited the
-      // SAME normal-sync flock. The descriptor remains held in this process.
-      const held = spawnSync("flock", ["-n", "3"], { stdio: ["ignore", "ignore", "pipe", handle.fd] });
-      assert.equal(held.status, 0, "Another worker holds the lease lock");
-      return handle;
-    }
-    catch (error) {
-      await handle.close();
-      throw error;
-    }
-  }
-  const noteLock = (noteId: string) => kernelLock(name(noteId).replace(/\.json$/, ".lock"));
-  async function persist(noteId: string, entry: DrawingTitleLeaseEntry, authority: Awaited<ReturnType<Ports["lockAuthority"]>>) {
+  async function persist(noteId: string, entry: DrawingTitleLeaseEntry, assertHeld: () => Promise<void>) {
     validEntry(entry);
     await safePaths();
     await privateTitleStateDirectory(root);
@@ -317,20 +302,19 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     finally {
       await handle.close();
     }
-    assert.ok(equal(await ports.lockAuthority(), authority), "Sync lock authority changed");
+    await assertHeld();
     await safePaths();
+    await assertHeld();
     await rename(temporary, destination);
-    await syncDirectory(directory);
-    await syncDirectory(root);
+    await syncTitleDirectory(directory, drawingTitleLedgerDurability.sync);
+    await syncTitleDirectory(root, drawingTitleLedgerDurability.sync);
   }
   async function change<T>(noteId: string, expectedRevision: number | undefined, run: (entry: DrawingTitleLeaseEntry | undefined, now: number) => {
     entry: DrawingTitleLeaseEntry;
     result: (entry: DrawingTitleLeaseEntry) => T;
     changed?: boolean;
   }) {
-    return serialize(name(noteId), async () => {
-      const authority = await ports.lockAuthority(), held = await noteLock(noteId);
-      try {
+    return operation(async assertHeld => {
         const entry = await readUnlocked(noteId);
         assert.equal(entry?.revision, expectedRevision, "Stale lease revision");
         const now = ports.now();
@@ -338,13 +322,9 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
         const decision = run(entry && structuredClone(entry), now);
         if (decision.changed !== false) {
           decision.entry.revision = (entry?.revision ?? 0) + 1;
-          await persist(noteId, decision.entry, authority);
+          await persist(noteId, decision.entry, assertHeld);
         }
         return decision.result(structuredClone(decision.entry));
-      }
-      finally {
-        await held.close();
-      }
     });
   }
   function common(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation) { return current.file === entry.intent.file && digestFields.every(field => current[field] === entry.intent[field]); }
@@ -400,31 +380,27 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     });
   }
   return {
-    /** Exclude sibling writers across planning, SDK operations and clone-state
-     * bookkeeping. This lock is distinct from all note locks used inside run. */
-    withVaultWriter: async <T>(run: () => Promise<T>): Promise<T> => serialize(path.join(directory, "writer.lock"), async () => {
-      const authority = await ports.lockAuthority(), held = await kernelLock(path.join(directory, "writer.lock"));
-      try {
-        assert.ok(equal(await ports.lockAuthority(), authority), "Sync lock authority changed");
-        const result = await run();
-        assert.ok(equal(await ports.lockAuthority(), authority), "Sync lock authority changed");
-        return result;
-      } finally { await held.close(); }
-    }),
+    /** Bind planning, dispatch and final bookkeeping to one participating run. */
+    writerGuard,
+    withWriter: async <T>(run: () => Promise<T>): Promise<T> => {
+      await storage();
+      return withDrawingTitleWriter(directory, async guard => {
+        assert.ok(!activeWriter, "Drawing title writer already active");
+        activeWriter = guard;
+        try { return await run(); } finally { activeWriter = undefined; }
+      });
+    },
     /** Hold execution ownership through the final checks and single SDK call.
      * The callback must not invoke ledger mutations; acknowledge afterwards. */
-    withDispatch: async <T>(noteId: string, args: { expectedRevision: number; token: string }, send: () => Promise<T>): Promise<T> => serialize(name(noteId), async () => {
-      const authority = await ports.lockAuthority(), held = await noteLock(noteId);
-      try {
+    withDispatch: async <T>(noteId: string, args: { expectedRevision: number; token: string }, send: () => Promise<T>): Promise<T> => operation(async assertHeld => {
         const entry = await readUnlocked(noteId);
         assert.ok(entry && entry.revision === args.expectedRevision && entry.pending && entry.pending.token === args.token && entry.stage !== "cancelled", "Stale or cancelled dispatch authority");
         const now = ports.now(); time(now);
         assert.ok(now >= entry.pending.issuedAt && now - entry.pending.issuedAt <= DRAWING_TITLE_REFRESH_INTERVAL_MS, "Expired title dispatch authority");
-        assert.ok(equal(await ports.lockAuthority(), authority), "Sync lock authority changed");
+        await assertHeld();
         const result = await send();
-        assert.ok(equal(await ports.lockAuthority(), authority), "Sync lock authority changed");
+        await assertHeld();
         return result;
-      } finally { await held.close(); }
     }),
     read: readUnlocked,
     listNoteIds: async () => { await safePaths(); let files; try {
@@ -435,6 +411,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
         return [];
       throw error;
     } const ids: string[] = []; for (const item of files) {
+      if (item === "writer.lockdir") continue;
       assert.ok(item === "writer.lock" || /^[a-f0-9]{64}\.(?:json(?:\.next)?|lock)$/.test(item), "Unknown lease storage file");
       if (!item.endsWith(".json")) { await safeRead(path.join(directory, item)); continue; }
       const raw = await safeRead(path.join(directory, item));

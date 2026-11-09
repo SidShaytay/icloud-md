@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { openSync, closeSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { mkdtemp, lstat, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -26,19 +24,11 @@ for (const field of ["folderIds", "noteIds"] as const) test(`status forwards ${f
   await assert.rejects(runStatus(vault, { drawingTitleReconciliation: { journalDirectory, folderIds: [folderId], noteIds: [noteId], [field]: ["invalid-uuid"] } }), /Invalid drawing title reconciliation scope/);
 }));
 test("status forwards valid reconciliation configuration without creating journals or changing clone state", () => fixture(async (vault, journalDirectory) => {
-  const fdPath = path.join(home, "sync.lock"), fd = openSync(fdPath, "a", 0o600);
-  assert.equal(spawnSync("flock", ["-n", "3"], { stdio: ["ignore", "ignore", "pipe", fd] }).status, 0);
-  const oldPath = process.env.ICLOUD_MD_PROBE_LOCK_PATH, oldFd = process.env.ICLOUD_MD_PROBE_LOCK_FD;
-  process.env.ICLOUD_MD_PROBE_LOCK_PATH = fdPath; process.env.ICLOUD_MD_PROBE_LOCK_FD = String(fd);
   const statePath = path.join(vault, ".icloud-md", "state.json"), before = await readFile(statePath, "utf8");
-  try {
+  {
     const result = await runStatus(vault, { drawingTitleReconciliation: { journalDirectory, folderIds: [folderId], noteIds: [noteId] } });
     assert.deepEqual(result.entries, []); assert.equal(result.unchanged, 0);
     assert.equal(await readFile(statePath, "utf8"), before);
     await assert.rejects(lstat(journalDirectory), { code: "ENOENT" });
-  } finally {
-    closeSync(fd);
-    if (oldPath === undefined) delete process.env.ICLOUD_MD_PROBE_LOCK_PATH; else process.env.ICLOUD_MD_PROBE_LOCK_PATH = oldPath;
-    if (oldFd === undefined) delete process.env.ICLOUD_MD_PROBE_LOCK_FD; else process.env.ICLOUD_MD_PROBE_LOCK_FD = oldFd;
   }
 }));

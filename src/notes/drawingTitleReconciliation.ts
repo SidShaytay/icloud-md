@@ -1,4 +1,4 @@
-/** Metadata-only ongoing Linux reconciliation. Cloud intent can settle while a
+/** Metadata-only ongoing reconciliation. Cloud intent can settle while a
  * device remains offline; later normal sync cycles reassert due titles. No
  * native device is contacted and no all-device completion is claimed. */
 import assert from "node:assert/strict";
@@ -6,13 +6,12 @@ import { createHash } from "node:crypto";
 import type { CloudKitRecord, RecordUpdate } from "../cloudkit/databaseClient.js";
 import { captureDrawingSnapshot, inspectDrawingRecords, type DrawingCapture } from "./attachmentTitleCapture.js";
 import { readAttachmentTitleFolders, readAttachmentTitleIntent, type LocalIntent } from "./attachmentTitleIntent.js";
-import { getAttachmentTitleLockAuthority } from "./attachmentTitleLock.js";
 import type { DrawingTitleIO } from "./drawingTitleCloud.js";
 import { openDrawingTitleLedger, type DrawingTitleLeaseIntent, type DrawingTitleLeaseObservation, type DrawingTitleLeaseEntry } from "./drawingTitleLedger.js";
 
 export interface DrawingTitleReconciliationConfig { journalDirectory: string; folderIds?: string[]; noteIds?: string[]; }
 export type DrawingTitleLedger = Awaited<ReturnType<typeof openDrawingTitleLedger>>;
-export interface DrawingReconciliationPorts { capture: typeof captureDrawingSnapshot; lockAuthority: typeof getAttachmentTitleLockAuthority; now(): number; }
+export interface DrawingReconciliationPorts { capture: typeof captureDrawingSnapshot; now(): number; }
 export interface DrawingReconciliationRequest {
   vault: string; file: string; noteId: string; attachmentId: string; folderId: string;
   expectedNoteTag: string; io: DrawingTitleIO; ledger: DrawingTitleLedger; kind: "rename" | "refresh";
@@ -20,7 +19,7 @@ export interface DrawingReconciliationRequest {
 export class DrawingTitleReconciliationUnavailable extends Error {}
 class DrawingTitleReconciliationConflict extends Error {}
 export type DrawingReconciliationResult = { status: "active-native-unverified" | "not-due"; note: CloudKitRecord } | { status: "uncertain" | "cancelled" };
-const defaults: DrawingReconciliationPorts = { capture: captureDrawingSnapshot, lockAuthority: getAttachmentTitleLockAuthority, now: Date.now };
+const defaults: DrawingReconciliationPorts = { capture: captureDrawingSnapshot, now: Date.now };
 const sameId = (a: string, b: string) => a.toUpperCase() === b.toUpperCase();
 const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable) : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, stable(item)])) : value;
 const json = (value: unknown) => JSON.stringify(stable(value));
@@ -56,8 +55,10 @@ export async function prepareDrawingTitleReconciliation(input: DrawingReconcilia
   const request = { ...input }, { io, ledger } = request, ports = { ...defaults, ...overrides };
   const scope = { noteId: request.noteId, attachmentId: request.attachmentId, folderId: request.folderId };
   const localOptions = { vault: request.vault, file: request.file, noteId: request.noteId, folderId: request.folderId };
+  const assertWriter = ledger.writerGuard();
   let existing = await ledger.read(request.noteId);
   const cancelPlan = () => ({ localOnly: true, verifyLocalIntent: async () => {}, execute: async (): Promise<DrawingReconciliationResult> => {
+    await assertWriter();
     if (existing) await ledger.cancel(request.noteId, { expectedRevision: existing.revision, reason: "Local or cloud drawing intent changed" });
     return { status: "cancelled" };
   } });
@@ -73,7 +74,6 @@ export async function prepareDrawingTitleReconciliation(input: DrawingReconcilia
     initialRecords = await lookup();
     initial = observe(local, initialRecords, request, folders);
   } catch (error) { if (error instanceof DrawingTitleReconciliationUnavailable || !existing) throw error; return cancelPlan(); }
-  const lock = await ports.lockAuthority();
   const same = existing !== undefined && matchesIntent(existing, local);
   const pending = existing?.pending;
   const priorCloudEffect = !!(pending && initial.documentSha256 === existing!.intent.documentSha256 && initial.assetRefsSha256 === existing!.intent.assetRefsSha256 && initial.protectedSha256 === existing!.intent.protectedSha256 &&
@@ -91,7 +91,7 @@ export async function prepareDrawingTitleReconciliation(input: DrawingReconcilia
     initialModificationDate: initial.modificationDate, noteModificationDate: initialDate,
   };
   async function checked() {
-    equal(await ports.lockAuthority(), lock, "Sync lock authority changed");
+    await assertWriter();
     try { equal(await readAttachmentTitleFolders(local, guardedIO), folders, "Private folder state changed"); }
     catch (error) { if (error instanceof DrawingTitleReconciliationUnavailable) throw error; throw new DrawingTitleReconciliationConflict("Private folder state changed"); }
     const currentLocal = await readLocal(); equal(currentLocal, local, "Local drawing intent changed");
@@ -146,6 +146,7 @@ export async function prepareDrawingTitleReconciliation(input: DrawingReconcilia
         await ledger.withDispatch(request.noteId, { expectedRevision: entry.revision, token: dispatch.token }, async () => {
           const immediate = await checked(); equal(immediate.observation, current.observation, "Drawing changed after durable intent");
           assert.ok(entry.pending && ports.now() >= entry.pending.issuedAt && ports.now() - entry.pending.issuedAt < 300_000, "Metadata dispatch expired");
+          await assertWriter();
           await io.update(update);
         });
         const after = await checked();
