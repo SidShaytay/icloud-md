@@ -13,8 +13,8 @@ export async function syncTitleDirectory(directory: string, sync = (file: Awaite
 
 /** Node exposes no Windows ACL ownership check: the caller must choose a private
  * user-accessible directory there. POSIX ownership/modes remain enforced. */
-export function titleStatePermissions(stat: { uid: number; mode: number }, privateMode = true): boolean {
-  return process.platform === "win32" || (stat.uid === process.getuid?.() && (!privateMode || (stat.mode & 0o077) === 0));
+export function titleStatePermissions(stat: { uid: number | bigint; mode: number | bigint }, privateMode = true): boolean {
+  return process.platform === "win32" || (BigInt(stat.uid) === BigInt(process.getuid!()) && (!privateMode || (BigInt(stat.mode) & 0o077n) === 0n));
 }
 
 export async function privateTitleStateDirectory(directory: string): Promise<void> {

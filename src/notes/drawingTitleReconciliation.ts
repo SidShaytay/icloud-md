@@ -7,7 +7,7 @@ import type { CloudKitRecord, RecordUpdate } from "../cloudkit/databaseClient.js
 import { captureDrawingSnapshot, inspectDrawingRecords, type DrawingCapture } from "./attachmentTitleCapture.js";
 import { readAttachmentTitleFolders, readAttachmentTitleIntent, type LocalIntent } from "./attachmentTitleIntent.js";
 import type { DrawingTitleIO } from "./drawingTitleCloud.js";
-import { openDrawingTitleLedger, type DrawingTitleLeaseIntent, type DrawingTitleLeaseObservation, type DrawingTitleLeaseEntry } from "./drawingTitleLedger.js";
+import { openDrawingTitleLedger, drawingTitlePendingPostcondition, type DrawingTitleLeaseIntent, type DrawingTitleLeaseObservation, type DrawingTitleLeaseEntry } from "./drawingTitleLedger.js";
 
 export interface DrawingTitleReconciliationConfig { journalDirectory: string; folderIds?: string[]; noteIds?: string[]; }
 export type DrawingTitleLedger = Awaited<ReturnType<typeof openDrawingTitleLedger>>;
@@ -75,19 +75,15 @@ export async function prepareDrawingTitleReconciliation(input: DrawingReconcilia
     initial = observe(local, initialRecords, request, folders);
   } catch (error) { if (error instanceof DrawingTitleReconciliationUnavailable || !existing) throw error; return cancelPlan(); }
   const same = existing !== undefined && matchesIntent(existing, local);
-  const pending = existing?.pending;
-  const priorCloudEffect = !!(pending && initial.documentSha256 === existing!.intent.documentSha256 && initial.assetRefsSha256 === existing!.intent.assetRefsSha256 && initial.protectedSha256 === existing!.intent.protectedSha256 &&
-    (pending.phase === "A" ? initial.attachmentTag !== pending.beforeTags.attachment && initial.noteTag === pending.beforeTags.note && initial.noteTitle === existing!.intent.initialNoteTitle && initial.attachmentTitle === existing!.intent.targetTitle && initial.modificationDate === existing!.intent.initialModificationDate
-      : initial.noteTag !== pending.beforeTags.note && initial.attachmentTag === pending.beforeTags.attachment && initial.noteTitle === existing!.intent.targetTitle && initial.attachmentTitle === existing!.intent.targetTitle && initial.modificationDate === existing!.intent.noteModificationDate));
+  const priorCloudEffect = existing && drawingTitlePendingPostcondition(existing, initial);
   if (!same && request.kind === "rename" && !priorCloudEffect) assert.equal(initial.noteTag, request.expectedNoteTag, "Changed remotely since the last pull");
   const initialDate = ports.now();
   if (!same) assert.ok(Number.isSafeInteger(initialDate) && initialDate > initial.modificationDate, "Local clock must advance past the note modification date before renaming");
   const intent: DrawingTitleLeaseIntent = same ? existing!.intent : {
     noteId: request.noteId, attachmentId: request.attachmentId, folderId: request.folderId, targetTitle: local.targetTitle,
     file: local.file, fileSha256: local.fileSha256, localBodySha256: local.baseSha256,
-    documentSha256: initial.documentSha256, assetRefsSha256: initial.assetRefsSha256, protectedSha256: initial.protectedSha256,
+    protectedSha256: initial.protectedSha256,
     initialNoteTitle: initial.noteTitle, initialAttachmentTitle: initial.attachmentTitle,
-    initialNoteTag: initial.noteTag, initialAttachmentTag: initial.attachmentTag,
     initialModificationDate: initial.modificationDate, noteModificationDate: initialDate,
   };
   async function checked() {
@@ -115,7 +111,7 @@ export async function prepareDrawingTitleReconciliation(input: DrawingReconcilia
       if (!existing || !same || existing.stage === "cancelled") {
         if (request.kind !== "rename") return { status: "cancelled" };
         if (existing?.pending) { await ledger.cancel(request.noteId, { expectedRevision: existing.revision, reason: "New local intent while a prior request remains uncertain" }); return { status: "uncertain" }; }
-        existing = await ledger.register(intent, existing ? { expectedRevision: existing.revision } : {});
+        existing = await ledger.register({ ...intent, initialNoteTag: initial.noteTag, initialAttachmentTag: initial.attachmentTag }, existing ? { expectedRevision: existing.revision } : {});
       }
       let entry = existing; executingEntry = entry;
       if (entry.stage === "cancelled") return { status: entry.pending ? "uncertain" : "cancelled" };
