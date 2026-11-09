@@ -45,7 +45,7 @@ test("ownership loss refuses dispatch and does not delete a replacement owner", 
 test("another process cannot enter, and killing the owner leaves a blocked lock", () => fixture(async directory => {
   const { spawn } = await import("node:child_process");
   const module = new URL("./drawingTitleLock.ts", import.meta.url).href;
-  const script = `const { withDrawingTitleWriter } = await import(${JSON.stringify(module)}); await withDrawingTitleWriter(process.argv[1], async () => { process.send('held'); await new Promise(() => {}); });`;
+  const script = `const { withDrawingTitleWriter } = await import(${JSON.stringify(module)}); await withDrawingTitleWriter(process.argv[1], async () => { process.send('held'); await new Promise(resolve => process.once('message', resolve)); });`;
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, directory], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
   let stderr = ""; child.stderr!.on("data", bytes => { stderr += bytes; });
   try {
@@ -53,7 +53,9 @@ test("another process cannot enter, and killing the owner leaves a blocked lock"
     assert.equal(message, "held");
     await assert.rejects(withDrawingTitleWriter(directory, async () => assert.fail()), /busy/);
   } finally {
-    const exited = once(child, "exit"); child.kill(); await exited;
+    if (child.pid && child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, "exit"); child.kill(); await exited;
+    }
   }
   await assert.rejects(withDrawingTitleWriter(directory, async () => assert.fail()), /busy/);
 }));
