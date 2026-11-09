@@ -399,6 +399,9 @@ A few consequences worth knowing before you pick:
   workflow running; devices may need a later fetch to display the new name.
   Other attachment types, shared notes and attachment-body edits keep their
   existing refusal rules.
+  Existing filename-mode vaults refresh names on their first pull after
+  upgrading, preserving local edits and leaving deleted or hand-renamed files
+  alone. In-body vaults keep their existing names.
 - **The mode is chosen once.** Switching an existing vault between the two
   shapes isn't supported yet: it would have to rewrite every file in the
   vault, which is a different (and more dangerous) operation than the
