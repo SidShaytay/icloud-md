@@ -2,9 +2,10 @@
 
 Use an existing account-bound vault cloned in filename-as-title mode
 (`clone --filename-as-title`). This opt-in Linux workflow handles same-folder
-filename renames for private notes
-containing one Apple drawing and no typed heading. It keeps the existing note,
-attachment, document, formatting and drawing/preview assets.
+filename renames for private notes containing one Apple drawing and no typed text. It keeps the existing note,
+attachment, document, formatting and drawing/preview assets. Rename the file
+without an `apple-note-title` frontmatter key; frontmatter title requests are
+not supported by this workflow.
 
 Apple Notes may import a Note before its drawing's new title, leaving the device's
 list name stale. The first push changes the drawing title and Note title, then
