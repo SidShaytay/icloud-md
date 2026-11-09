@@ -389,6 +389,12 @@ A few consequences worth knowing before you pick:
   `pull`**, since there is nowhere else for the new title to go. A retitle
   you asked for locally takes the same road, which is why renaming is always
   something `pull` does and never something `push` does.
+- **Scan/drawing-first notes keep their attachments and independent title.**
+  New exports name them from Apple's display title, or `Untitled` if none is
+  usable, rather than from an object-replacement symbol. Filename or
+  `apple-note-title` changes are refused: cloud display metadata alone does not
+  reliably retitle native Apple Notes. Retitle in Notes, then pull. Existing
+  attachment-body restrictions still apply.
 - **The mode is chosen once.** Switching an existing vault between the two
   shapes isn't supported yet: it would have to rewrite every file in the
   vault, which is a different (and more dangerous) operation than the

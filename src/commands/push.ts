@@ -73,6 +73,7 @@ import {
 } from "../notes/noteDocument.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
+const INDEPENDENT_TITLE_REFUSAL = "this note's independent attachment title cannot be safely changed by this tool yet";
 
 /**
  * Why an edit to this tracked shared note can't be pushed, or undefined
@@ -1794,6 +1795,13 @@ export function prepareRetitle(
     const detail = classified.status === "unsyncable" ? classified.reason : classified.status;
     return refused(`renaming this note would retitle it, but the note is no longer safely editable (${detail})`);
   }
+  if (classified.titleInMetadata && !storesTextAsAsset(record)) {
+    // Reading this title is safe; changing CloudKit display metadata alone
+    // did not update the native iPhone list in the 2026-11-05 device test.
+    // Do not replace the embedded paragraph or synthesize an edit stamp.
+    if (pair.newTitle === classified.title) return { ok: true, retitle: undefined };
+    return refused(INDEPENDENT_TITLE_REFUSAL);
+  }
   if (!classified.publishable) {
     return refused(
       `renaming this note would retitle it, but this note ${classified.unpublishableReason ?? "contains content this tool can't parse"}`,
@@ -1989,9 +1997,9 @@ function retitleRemark(title: string): string {
  * strip the real one's styling - on every push, forever.
  */
 function requestedRetitle(classified: OkNoteRecordResult, requestedTitle: string | undefined): string | undefined {
-  if (requestedTitle === undefined || classified.titleStripped !== true) {
-    return undefined;
-  }
+  if (requestedTitle === undefined) return undefined;
+  if (classified.titleInMetadata) return requestedTitle === classified.title ? undefined : requestedTitle;
+  if (classified.titleStripped !== true) return undefined;
   return requestedTitle === classified.format?.[0]?.text ? undefined : requestedTitle;
 }
 
@@ -2050,14 +2058,16 @@ export function restoreStrippedTitle(
   requestedTitle?: string | undefined,
 ): { text: string; paragraphs: FormatParagraph[] } | undefined {
   if (classified.titleStripped !== true) {
-    if (requestedTitle !== undefined) {
-      // The one note a filename-as-title vault leaves title-in-body: its
-      // title paragraph holds an embed placeholder. Refused rather than
-      // ignored - silently dropping a title the user asked for would look
-      // like the push succeeded at something it never attempted.
+    if (requestedTitle !== undefined && !(classified.titleInMetadata && requestedTitle === classified.title)) {
+      // An unchanged independent title is the record of an unrepresentable
+      // filename, not a retitle. A real title request must not be silently
+      // ignored, or passed off as a
+      // successful display-metadata write the native client may not adopt.
       summary.refused.push(
-        `${entry.file}: this note's title contains an embedded object, so "${NOTE_TITLE_KEY}" can't retitle it - ` +
-          "retitle it in Notes instead.",
+        classified.titleInMetadata
+          ? `${entry.file}: ${INDEPENDENT_TITLE_REFUSAL} - undo the "${NOTE_TITLE_KEY}" change and retitle it in Notes instead`
+          : `${entry.file}: this note's title contains an embedded object, so "${NOTE_TITLE_KEY}" can't retitle it - ` +
+            "retitle it in Notes instead.",
       );
       return undefined;
     }
