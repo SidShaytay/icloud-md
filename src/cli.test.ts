@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
-import { openSync, closeSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -140,14 +139,14 @@ function failsUsageWith(pattern: RegExp): (error: unknown) => boolean {
 test("both commands accept repeated scopes and resolve a relative reconciliation directory without writing it", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "cli-title-forward-")), vault = path.join(root, "vault"), journalDirectory = path.join(root, "private-evidence");
   await writeCloneState(vault, { titleMode: "filename", account: { appleId: "fixture@example.invalid", dsid: "cli-fixture" }, syncToken: "", notes: {} });
-  const lockPath = path.join(root, "sync.lock"), fd = openSync(lockPath, "a", 0o600);
-  assert.equal(spawnSync("flock", ["-n", "3"], { stdio: ["ignore", "ignore", "pipe", fd] }).status, 0);
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, ICLOUD_MD_BROWSER_EXECUTABLE: process.execPath };
+  delete env.ICLOUD_MD_PROBE_LOCK_PATH; delete env.ICLOUD_MD_PROBE_LOCK_FD;
   try {
     for (const command of ["status", "push"]) {
       const args = ["--import", "tsx", cliPath, "--json", command, vault, "--reconcile-drawing-titles", path.relative(packageRoot, journalDirectory), "--drawing-title-folder", drawingScopeId, "--drawing-title-folder", drawingScopeId.toUpperCase(), "--drawing-title-note", drawingScopeId, "--drawing-title-note", "11111111-1111-4111-8111-111111111111", ...(command === "push" ? ["--dry-run"] : [])];
-      const result = spawnSync(process.execPath, args, { cwd: packageRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe", fd], env: { ...process.env, HOME: root, ICLOUD_MD_BROWSER_EXECUTABLE: process.execPath, ICLOUD_MD_PROBE_LOCK_PATH: lockPath, ICLOUD_MD_PROBE_LOCK_FD: "3" } });
+      const result = spawnSync(process.execPath, args, { cwd: packageRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env });
       assert.equal(result.status, 0, result.stderr); assert.deepEqual(JSON.parse(result.stdout).entries, []);
       await assert.rejects(lstat(journalDirectory), { code: "ENOENT" });
     }
-  } finally { closeSync(fd); await rm(root, { recursive: true, force: true }); }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

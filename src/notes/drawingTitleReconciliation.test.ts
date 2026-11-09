@@ -227,7 +227,7 @@ test("an escaped execution paused in lookup cannot send after its scope closes",
   let pause = false, resume!: () => void, reached!: () => void;
   const gate = new Promise<void>(resolve => { resume = resolve; }), entered = new Promise<void>(resolve => { reached = resolve; });
   const io = { ...f.io, lookup: async (ids: string[]) => {
-    if (pause) { pause = false; reached(); await gate; }
+    if (pause && (await ledger.read(noteId))?.pending) { pause = false; reached(); await gate; }
     return f.io.lookup(ids);
   } };
   let executing!: Promise<Awaited<ReturnType<Awaited<ReturnType<typeof prepareDrawingTitleReconciliation>>["execute"]>>>;
@@ -238,4 +238,21 @@ test("an escaped execution paused in lookup cannot send after its scope closes",
   resume();
   assert.equal((await executing).status, "uncertain");
   assert.equal(f.writes.length, 0);
+}));
+
+
+test("preview and prior-run cancellation plans cannot mutate a later writer scope", () => fixture(async f => {
+  const ledger = await openDrawingTitleLedger({ vault: f.vault, journalDirectory: f.options.journalDirectory, accountDsidSha256: f.io.accountDsidSha256 }, { now: f.ports.now });
+  const request = { ...f.options, ledger };
+  await ledger.withWriter(async () => { assert.equal((await (await prepareDrawingTitleReconciliation(request, f.ports)).execute()).status, "active-native-unverified"); });
+  await writeFile(path.join(f.vault, f.file), f.local + "Typed text");
+  const preview = await prepareDrawingTitleReconciliation(request, f.ports);
+  let old!: Awaited<ReturnType<typeof prepareDrawingTitleReconciliation>>;
+  await ledger.withWriter(async () => { old = await prepareDrawingTitleReconciliation(request, f.ports); });
+  await ledger.withWriter(async () => {
+    await assert.rejects(preview.execute(), /writer scope/);
+    await assert.rejects(old.execute(), /closed/);
+    assert.equal((await ledger.read(noteId))?.stage, "active");
+    assert.equal(f.writes.length, 2);
+  });
 }));
