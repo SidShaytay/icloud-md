@@ -10,7 +10,7 @@ const intent: DrawingTitleLeaseRegistration = {
 };
 function observation(overrides: Partial<DrawingTitleLeaseObservation> = {}): DrawingTitleLeaseObservation {
   return {
-    file: intent.file, fileSha256: intent.fileSha256, localBodySha256: intent.localBodySha256, documentSha256: "3".repeat(64), assetRefsSha256: "4".repeat(64), protectedSha256: intent.protectedSha256, noteTag: "note-1", attachmentTag: "attachment-1", noteTitle: "Old drawing", attachmentTitle: "Old drawing", modificationDate: 100, ...overrides
+    file: intent.file, fileSha256: intent.fileSha256, localBodySha256: intent.localBodySha256, protectedSha256: intent.protectedSha256, noteTag: "note-1", attachmentTag: "attachment-1", noteTitle: "Old drawing", attachmentTitle: "Old drawing", modificationDate: 100, ...overrides
   };
 }
 async function fixture(run: (f: Awaited<ReturnType<typeof setup>>) => Promise<void>) {
@@ -390,19 +390,6 @@ test("alternate UUID spelling cannot restart the same acknowledged rename phase"
 }));
 
 
-test("portable writer preserves inert legacy writer.lock files", () => fixture(async f => {
-  let legacy!: string;
-  await f.ledger.withWriter(async () => {
-    const base = path.join(f.options.journalDirectory, "drawing-title-leases-v1");
-    const namespace = (await readdir(base))[0]!;
-    legacy = path.join(base, namespace, "writer.lock");
-    await writeFile(legacy, "legacy", { mode: 0o600 });
-    await f.ledger.register(intent);
-  });
-  await f.ledger.withWriter(async () => assert.deepEqual(await f.ledger.listNoteIds(), [noteId.toUpperCase()]));
-  assert.equal(await readFile(legacy, "utf8"), "legacy");
-}));
-
 test("canonical parent aliases share the same pinned store while a symlink store refuses", () => fixture(async f => {
   const actual = path.join(f.root, "actual"), alias = path.join(f.root, "alias");
   await mkdir(actual); await symlink(actual, alias, "junction");
@@ -411,4 +398,52 @@ test("canonical parent aliases share the same pinned store while a symlink store
   await ledger.withWriter(async () => { await ledger.register(intent); });
   const reopened = await openDrawingTitleLedger({ ...f.options, journalDirectory: path.join(actual, "new", "private") }, f.ports);
   assert.equal((await reopened.read(noteId))?.intent.targetTitle, intent.targetTitle);
+}));
+
+for (const access of ["read", "list", "dispatch"] as const) test(`unsupported v1 ${access} refuses without changing pending evidence`, () => fixture(async f => {
+  const registered = await f.ledger.register(intent);
+  const claim = await f.ledger.claim(noteId, { expectedRevision: registered.revision, observation: observation() });
+  const request = claim.entry.pending!;
+  const { createHash } = await import("node:crypto");
+  const requestSha256 = createHash("sha256").update(JSON.stringify({ phase: "A", recordChangeTag: request.beforeTags.attachment, recordName: attachmentId, targetTitle: intent.targetTitle })).digest("hex");
+  const old = { ...claim.entry, version: 1,
+    intent: { ...claim.entry.intent, initialNoteTag: intent.initialNoteTag, initialAttachmentTag: intent.initialAttachmentTag, documentSha256: "3".repeat(64), assetRefsSha256: "4".repeat(64) },
+    pending: { ...request, recordName: attachmentId, targetTitle: intent.targetTitle, requestSha256 }, nextDue: 700000, uncertainCount: 0 };
+  const base = path.join(f.options.journalDirectory, "drawing-title-leases-v1"), directory = path.join(base, (await readdir(base))[0]!);
+  const file = path.join(directory, (await readdir(directory)).find(name => name.endsWith(".json"))!);
+  await writeFile(file, JSON.stringify(old)); const before = await readFile(file, "utf8"), files = await readdir(directory);
+  let dispatched = 0;
+  const operation = access === "read" ? () => f.ledger.read(noteId) : access === "list" ? () => f.ledger.listNoteIds() :
+    () => f.ledger.withWriter(() => f.ledger.withDispatch(noteId, { expectedRevision: old.revision, token: request.token }, async () => { dispatched++; }));
+  await assert.rejects(operation(), /Unsupported.*version/i);
+  assert.equal(dispatched, 0); assert.equal(await readFile(file, "utf8"), before);
+  assert.deepEqual(await readdir(directory), files);
+}));
+
+async function storedLedgerFile(f: Awaited<ReturnType<typeof setup>>): Promise<string> {
+  const root = path.join(f.options.journalDirectory, "drawing-title-leases-v1");
+  const directory = path.join(root, (await readdir(root))[0]!);
+  return path.join(directory, (await readdir(directory)).find(name => name.endsWith(".json"))!);
+}
+test("an unknown schema version cannot inherit current pending dispatch authority", () => fixture(async f => {
+  const registered = await f.ledger.register(intent);
+  const claim = await f.ledger.claim(noteId, { expectedRevision: registered.revision, observation: observation() });
+  const file = await storedLedgerFile(f), unsupported = JSON.stringify({ ...claim.entry, version: 99 });
+  await writeFile(file, unsupported); let dispatched = 0;
+  await assert.rejects(f.ledger.withWriter(() => f.ledger.withDispatch(noteId,
+    { expectedRevision: claim.entry.revision, token: claim.dispatch!.token }, async () => { dispatched++; })), /Unsupported.*version/i);
+  assert.equal(dispatched, 0); assert.equal(await readFile(file, "utf8"), unsupported);
+}));
+test("current-format records reject discarded compatibility fields without rewriting them", () => fixture(async f => {
+  const entry = await f.ledger.register(intent), file = await storedLedgerFile(f);
+  const unsupported = JSON.stringify({ ...entry, legacyContent: { documentSha256: "3".repeat(64), assetRefsSha256: "4".repeat(64) } });
+  await writeFile(file, unsupported);
+  await assert.rejects(f.ledger.read(noteId), /Unknown ledger fields/);
+  assert.equal(await readFile(file, "utf8"), unsupported);
+}));
+test("unknown storage files are refused instead of interpreted or silently removed", () => fixture(async f => {
+  await f.ledger.register(intent); const directory = path.dirname(await storedLedgerFile(f));
+  const unknown = path.join(directory, "unexpected.bin"); await writeFile(unknown, "preserve", { mode: 0o600 });
+  await assert.rejects(f.ledger.listNoteIds(), /Unknown lease storage file/);
+  assert.equal(await readFile(unknown, "utf8"), "preserve");
 }));
