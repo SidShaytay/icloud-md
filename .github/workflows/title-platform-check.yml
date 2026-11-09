@@ -1,0 +1,25 @@
+name: Drawing title portability check
+on:
+  push:
+    branches: [codex/title-portability-verification]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '26']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run typecheck:integration
+      - run: npm run build
+      - name: Test title workflow and storage
+        run: node --import tsx --test src/notes/drawingTitleLock.test.ts src/notes/drawingTitleLedger.test.ts src/notes/drawingTitleReconciliation.test.ts src/commands/drawingTitleReconciliation.plan.test.ts src/commands/status.drawingTitleReconciliation.test.ts src/notes/attachmentTitleCapture.test.ts src/notes/drawingTitleCloud.test.ts
