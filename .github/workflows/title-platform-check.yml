@@ -22,6 +22,6 @@ jobs:
       - run: npm run typecheck:integration
       - run: npm run build
       - name: Test title workflow and storage
-        run: node --import tsx --test src/notes/drawingTitleLock.test.ts src/notes/drawingTitleLedger.test.ts src/notes/drawingTitleReconciliation.test.ts src/commands/drawingTitleReconciliation.plan.test.ts src/commands/status.drawingTitleReconciliation.test.ts src/notes/attachmentTitleCapture.test.ts src/notes/drawingTitleCloud.test.ts
+        run: node --import tsx --test src/notes/drawingTitleLock.test.ts src/notes/drawingTitleLedger.test.ts src/notes/drawingTitleLedger.migration.test.ts src/notes/drawingTitleReconciliation.test.ts src/commands/drawingTitleReconciliation.plan.test.ts src/commands/status.drawingTitleReconciliation.test.ts src/notes/attachmentTitleCapture.test.ts src/notes/drawingTitleCloud.test.ts
       - name: Test CLI option forwarding without a wrapper
         run: node --import tsx --test --test-name-pattern="both commands accept repeated scopes" src/cli.test.ts
