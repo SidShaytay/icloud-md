@@ -124,6 +124,30 @@ To run only this block:
 npm run build && ICLOUD_MD_ITEST=1 npx tsx --test --test-name-pattern="carriage-return" integration/live.test.ts
 ```
 
+## Drawing-title reconciliation verification
+
+The opt-in [ongoing Linux workflow](../docs/drawing-title-reconciliation.md)
+changes title metadata only. Offline SDK tests assert the exact initial field
+sets and the later Note-title-only refresh, conditional record versions, durable
+uncertainty, conflict cancellation, writer exclusion and local bookkeeping.
+Preservation tests compare compressed document bytes and every drawing/preview
+asset, and refuse unknown assets or changed record/reference fingerprints.
+
+The source implementation passed two successive ordinary Linux filename cycles
+with Mac Notes closed for each initial write. The first native fetch retained
+the previous list name; a later independently scheduled Linux title refresh
+corrected it. Native readback, reopening and a further normal cycle retained the
+final title. On 2026-11-08, the owner confirmed that final title on iPhone after
+reopening Notes, with one intact drawing and no added heading. Document, assets,
+references and identity were preserved; paired measurements for the second
+refresh also preserved local Markdown/base bytes, timestamps and inode.
+
+These native observations apply to the verified source branch, recorded in
+[issue #1](https://github.com/SidShaytay/icloud-md/issues/1). Extraction must pass
+its own retained offline suite; changed dispatch or state semantics require
+fresh native verification. The writer never reads native verification output,
+and future Linux sync and device fetch may still be needed for list convergence.
+
 ## Containment
 
 Fixtures are confined to a dedicated Notes folder, and two independent keys

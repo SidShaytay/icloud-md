@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import chalk from "chalk";
 import cliProgress from "cli-progress";
-import { Command, CommanderError } from "commander";
+import { Command, CommanderError, InvalidArgumentError } from "commander";
+import path from "node:path";
 import ora from "ora";
 import { BROWSER_EXECUTABLE_ENV, installChromium, resolveBrowserExecutable } from "./auth/browserLogin.js";
 import { reauthenticateFolder, resolveFolderAccount } from "./auth/folderAuth.js";
@@ -28,6 +29,8 @@ import { renderPullReport } from "./cli/pullReport.js";
 import { NotClonedDirectoryError } from "./errors.js";
 import { recordLastError } from "./lastError.js";
 import { readCloneState } from "./notes/cloneState.js";
+import { isNoteId } from "./notes/noteIdFrontmatter.js";
+import type { DrawingTitleReconciliationConfig } from "./notes/drawingTitleReconciliation.js";
 import { renderPlan } from "./notes/pushPlan.js";
 import { displayPath, findVaultRoot } from "./vaultRoot.js";
 import { readOwnPackageVersion } from "./version.js";
@@ -244,6 +247,36 @@ function contextFor(command: Command): OutputContext {
   return createOutputContext(opts.json === true);
 }
 
+interface DrawingTitleCliOptions {
+  reconcileDrawingTitles?: string;
+  drawingTitleFolder?: string[];
+  drawingTitleNote?: string[];
+}
+function collectDrawingTitleId(value: string, previous: string[]): string[] {
+  if (!isNoteId(value)) throw new InvalidArgumentError("drawing title scope must be a UUID");
+  return [...new Set([...previous, value.toUpperCase()])];
+}
+function drawingTitleOptions(command: Command): Command {
+  return command
+    .option("--reconcile-drawing-titles <private-dir>", "reconcile drawing filenames across later sync runs; store private state outside the vault")
+    .option("--drawing-title-folder <uuid>", "limit drawing reconciliation to this folder (repeatable; intersects note scope)", collectDrawingTitleId, [])
+    .option("--drawing-title-note <uuid>", "limit drawing reconciliation to this note (repeatable; intersects folder scope)", collectDrawingTitleId, []);
+}
+function drawingTitleConfig(opts: DrawingTitleCliOptions, command: Command): DrawingTitleReconciliationConfig | undefined {
+  if (opts.reconcileDrawingTitles === undefined) {
+    if (opts.drawingTitleFolder?.length || opts.drawingTitleNote?.length) {
+      command.error("drawing title scope flags require --reconcile-drawing-titles");
+    }
+    return undefined;
+  }
+  if (!opts.reconcileDrawingTitles) command.error("drawing reconciliation requires a private directory");
+  return {
+    journalDirectory: path.resolve(opts.reconcileDrawingTitles),
+    ...(opts.drawingTitleFolder?.length ? { folderIds: opts.drawingTitleFolder } : {}),
+    ...(opts.drawingTitleNote?.length ? { noteIds: opts.drawingTitleNote } : {}),
+  };
+}
+
 // `--json` is scanned directly from argv (rather than waiting for commander
 // to parse it) so a usage error - which can happen before or instead of
 // normal option parsing - still knows which mode to report in.
@@ -360,18 +393,21 @@ program
     emitResult(context, summary, (result) => printPullSummary(targetDir, result));
   });
 
-program
+drawingTitleOptions(program
   .command("push [directory]")
   .description(
     "Reconcile local disk state up to iCloud: creates notes for new .md files, uploads edited notes, moves notes " +
       "whose file was removed locally to Recently Deleted, and merges in remote changes to a note edited both " +
       'places. Run "status" first to see exactly what push will do, including anything it would refuse.',
   )
-  .option("--dry-run", "report what would be pushed without changing anything")
-  .action(async (directory: string | undefined, opts: { dryRun?: boolean }, command: Command) => {
+  .option("--dry-run", "report what would be pushed without changing anything"))
+  .action(async (directory: string | undefined, opts: DrawingTitleCliOptions & { dryRun?: boolean }, command: Command) => {
+    const drawingTitleReconciliation = drawingTitleConfig(opts, command);
     const context = contextFor(command);
     const targetDir = await resolveTargetDir(directory);
-    const result = await runPush(targetDir, { dryRun: opts.dryRun === true, onLoginStatus: makeStatusSink(context) });
+    const result = await runPush(targetDir, { dryRun: opts.dryRun === true, onLoginStatus: makeStatusSink(context),
+      ...(drawingTitleReconciliation ? { drawingTitleReconciliation } : {}),
+    });
     emitResult(context, result, (r) => {
       printNotices(r.notices);
       for (const entry of r.entries) {
@@ -395,16 +431,19 @@ program
     }
   });
 
-program
+drawingTitleOptions(program
   .command("status [directory]")
   .description(
     "Preview exactly what the next push will do - creates, deletes, changes, and any refusals - using the same " +
       "live check push --dry-run performs (requires signing in)",
-  )
-  .action(async (directory: string | undefined, _opts: unknown, command: Command) => {
+  ))
+  .action(async (directory: string | undefined, opts: DrawingTitleCliOptions, command: Command) => {
+    const drawingTitleReconciliation = drawingTitleConfig(opts, command);
     const context = contextFor(command);
     const targetDir = await resolveTargetDir(directory);
-    const result = await runStatus(targetDir, { onLoginStatus: makeStatusSink(context) });
+    const result = await runStatus(targetDir, { onLoginStatus: makeStatusSink(context),
+      ...(drawingTitleReconciliation ? { drawingTitleReconciliation } : {}),
+    });
     emitResult(context, result, (r) => {
       printNotices(r.notices);
       for (const line of renderPlan(r.entries, (file) => displayPath(targetDir, file), {

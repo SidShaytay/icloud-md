@@ -391,10 +391,14 @@ A few consequences worth knowing before you pick:
   something `pull` does and never something `push` does.
 - **Scan/drawing-first notes keep their attachments and independent title.**
   New exports name them from Apple's display title, or `Untitled` if none is
-  usable, rather than from an object-replacement symbol. Filename or
-  `apple-note-title` changes are refused: cloud display metadata alone does not
-  reliably retitle native Apple Notes. Retitle in Notes, then pull. Existing
-  attachment-body restrictions still apply.
+  usable, rather than from an object-replacement symbol. By default, filename
+  or `apple-note-title` changes are refused. Private notes containing one drawing
+  can opt in to [ongoing Linux title reconciliation](docs/drawing-title-reconciliation.md)
+  for same-folder filename renames. Later pushes reassert only the Note title
+  when due, preserving its date, document and assets. Keep the periodic Linux
+  workflow running; devices may need a later fetch to display the new name.
+  Other attachment types, shared notes and attachment-body edits keep their
+  existing refusal rules.
 - **The mode is chosen once.** Switching an existing vault between the two
   shapes isn't supported yet: it would have to rewrite every file in the
   vault, which is a different (and more dangerous) operation than the
@@ -419,12 +423,12 @@ integration never gets to it.
 
 ## Known limitations
 
-- **Regular file attachments (images, audio, other files) are permanently
-  read-only** `push` will always refuse to write back
-  a note that has a non-table attachment, since this tool doesn't fully
-  parse that part of a note's internal format and editing one back risks
-  corrupting it. `restore <file>` discards any local edit to get back to a
-  clean copy. (Tables are the one exception — see above.)
+- **Body edits to regular file attachments (images, audio, other files)
+  remain read-only.** `push` refuses these content edits because it cannot
+  safely rebuild their internal format. The drawing-only opt-in title workflow
+  described above changes metadata while preserving the document and assets.
+  `restore <file>` discards a local body edit to get back to a clean copy.
+  Tables have a separate content-edit path — see above.
 - **Very large notes are read-only.** Past some size (seen on a note of
   ~830 KB compressed, most of it edit history) Apple moves a note's text
   out of the record and into a separate file. `clone` and `pull` download
