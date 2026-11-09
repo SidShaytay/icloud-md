@@ -3,14 +3,14 @@ import { test } from "node:test";
 import { mkdtemp, mkdir, lstat, readdir, readFile, rm, symlink, writeFile, chmod } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { openDrawingTitleLedger, drawingTitleLedgerDurability, type DrawingTitleLeaseIntent, type DrawingTitleLeaseObservation } from "./drawingTitleLedger.js";
+import { openDrawingTitleLedger, drawingTitleLedgerDurability, type DrawingTitleLeaseRegistration, type DrawingTitleLeaseObservation } from "./drawingTitleLedger.js";
 const noteId = "11111111-1111-4111-8111-111111111111", attachmentId = "22222222-2222-4222-8222-222222222222", folderId = "33333333-3333-4333-8333-333333333333";
-const intent: DrawingTitleLeaseIntent = {
-  noteId, attachmentId, folderId, targetTitle: "New drawing", file: "TEST/New drawing.md", fileSha256: "1".repeat(64), localBodySha256: "2".repeat(64), documentSha256: "3".repeat(64), assetRefsSha256: "4".repeat(64), protectedSha256: "5".repeat(64), initialNoteTitle: "Old drawing", initialAttachmentTitle: "Old drawing", initialNoteTag: "note-1", initialAttachmentTag: "attachment-1", initialModificationDate: 100, noteModificationDate: 200
+const intent: DrawingTitleLeaseRegistration = {
+  noteId, attachmentId, folderId, targetTitle: "New drawing", file: "TEST/New drawing.md", fileSha256: "1".repeat(64), localBodySha256: "2".repeat(64), protectedSha256: "5".repeat(64), initialNoteTitle: "Old drawing", initialAttachmentTitle: "Old drawing", initialNoteTag: "note-1", initialAttachmentTag: "attachment-1", initialModificationDate: 100, noteModificationDate: 200
 };
 function observation(overrides: Partial<DrawingTitleLeaseObservation> = {}): DrawingTitleLeaseObservation {
   return {
-    file: intent.file, fileSha256: intent.fileSha256, localBodySha256: intent.localBodySha256, documentSha256: intent.documentSha256, assetRefsSha256: intent.assetRefsSha256, protectedSha256: intent.protectedSha256, noteTag: "note-1", attachmentTag: "attachment-1", noteTitle: "Old drawing", attachmentTitle: "Old drawing", modificationDate: 100, ...overrides
+    file: intent.file, fileSha256: intent.fileSha256, localBodySha256: intent.localBodySha256, documentSha256: "3".repeat(64), assetRefsSha256: "4".repeat(64), protectedSha256: intent.protectedSha256, noteTag: "note-1", attachmentTag: "attachment-1", noteTitle: "Old drawing", attachmentTitle: "Old drawing", modificationDate: 100, ...overrides
   };
 }
 async function fixture(run: (f: Awaited<ReturnType<typeof setup>>) => Promise<void>) {
@@ -170,7 +170,7 @@ test("lost same-value refresh permits a fresh distinct bounded attempt only afte
   }), /pending/i);
 }));
 for (const field of [
-  "file", "fileSha256", "localBodySha256", "documentSha256", "assetRefsSha256", "protectedSha256", "noteTitle", "attachmentTitle", "modificationDate"
+  "file", "fileSha256", "localBodySha256", "protectedSha256", "noteTitle", "attachmentTitle", "modificationDate"
 ] as const)
   test(`foreign ${field} cancels lease before a due dispatch`, () => fixture(async (f) => {
     const e = await active(f);

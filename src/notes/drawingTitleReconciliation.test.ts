@@ -163,7 +163,7 @@ test("later fresh read of committed refresh is observed state, never a false SDK
   assert.equal((await (await prepareDrawingTitleReconciliation({ ...f.options, kind: "refresh", io }, f.ports)).execute()).status, "uncertain");
   const result = await (await prepareDrawingTitleReconciliation({ ...f.options, kind: "refresh" }, f.ports)).execute();
   assert.equal(result.status, "not-due"); assert.equal(f.writes.length, 3);
-  const entry = await f.ledger.read(noteId); assert.equal(entry?.lastReceipt?.outcome, "postcondition-observed"); assert.ok(entry!.uncertainCount >= 1);
+  const entry = await f.ledger.read(noteId); assert.equal(entry?.lastReceipt?.outcome, "postcondition-observed"); assert.ok(entry!.recentUncertain.length >= 1);
 }));
 
 test("lowercase CloudKit note names remain exact in metadata writes despite canonical ledger UUIDs", () => fixture(async f => {

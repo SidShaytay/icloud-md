@@ -393,9 +393,9 @@ A few consequences worth knowing before you pick:
   New exports name them from Apple's display title, or `Untitled` if none is
   usable, rather than from an object-replacement symbol. By default, filename
   or `apple-note-title` changes are refused. Private notes containing one drawing
-  can opt in to [ongoing Linux title reconciliation](docs/drawing-title-reconciliation.md)
+  can opt in to [ongoing title updates](docs/drawing-title-reconciliation.md)
   for same-folder filename renames. Later pushes reassert only the Note title
-  when due, preserving its date, document and assets. Keep the periodic Linux
+  when due, preserving its date, document and assets. Keep the periodic sync
   workflow running; devices may need a later fetch to display the new name.
   Other attachment types, shared notes and attachment-body edits keep their
   existing refusal rules.

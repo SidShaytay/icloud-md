@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readdir, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
-import { isEnoent } from "../fsUtil.js";
+import { isEnoent, lstatIfPresent } from "../fsUtil.js";
 import { isNoteId } from "./noteIdFrontmatter.js";
 import { titleIsRepresentable } from "./titleFilename.js";
 import { titleFromNoteFileName } from "./noteTitleParagraph.js";
@@ -21,13 +21,9 @@ export interface DrawingTitleLeaseIntent {
   file: string;
   fileSha256: string;
   localBodySha256: string;
-  documentSha256: string;
-  assetRefsSha256: string;
   protectedSha256: string;
   initialNoteTitle: string;
   initialAttachmentTitle: string;
-  initialNoteTag: string;
-  initialAttachmentTag: string;
   initialModificationDate: number;
   noteModificationDate: number;
 }
@@ -49,33 +45,35 @@ interface Tags {
   note: string;
   attachment: string;
 }
+export type DrawingTitleLeaseRegistration = DrawingTitleLeaseIntent & { initialNoteTag: string; initialAttachmentTag: string };
 interface Pending {
   token: string;
   phase: Phase;
   beforeTags: Tags;
   issuedAt: number;
-  recordName: string;
-  targetTitle: string;
-  requestSha256: string;
 }
-interface Receipt extends Pending {
+interface Receipt extends Pick<Pending, "token" | "phase"> {
   outcome: "sdk-acknowledged" | "postcondition-observed" | "uncertain";
-  observedAt: number;
 }
 export interface DrawingTitleLeaseEntry {
-  version: 1;
+  version: 2;
   revision: number;
   intent: DrawingTitleLeaseIntent;
   stage: "attachment" | "note" | "active" | "cancelled";
   tags: Tags;
   pending?: Pending;
   nextDue?: number;
-  lastAcknowledgedAt?: number;
   lastReceipt?: Receipt;
   recentUncertain: Receipt[];
-  uncertainCount: number;
-  cancelReason?: string;
+  legacyContent?: Pick<DrawingTitleLeaseObservation, "documentSha256" | "assetRefsSha256">;
 }
+type LegacyIntent = DrawingTitleLeaseRegistration & Pick<DrawingTitleLeaseObservation, "documentSha256" | "assetRefsSha256">;
+type LegacyPending = Pending & { recordName: string; targetTitle: string; requestSha256: string };
+type LegacyReceipt = LegacyPending & Pick<Receipt, "outcome"> & { observedAt: number };
+type LegacyEntry = Omit<DrawingTitleLeaseEntry, "version" | "intent" | "pending" | "lastReceipt" | "recentUncertain" | "legacyContent"> & {
+  version: 1; intent: LegacyIntent; pending?: LegacyPending; lastReceipt?: LegacyReceipt;
+  recentUncertain: LegacyReceipt[]; uncertainCount: number; lastAcknowledgedAt?: number; cancelReason?: string;
+};
 export interface DrawingTitleLeaseClaim {
   entry: DrawingTitleLeaseEntry;
   dispatch: DrawingTitleLeaseDispatch | undefined;
@@ -88,6 +86,7 @@ export interface DrawingTitleLeaseDispatch {
   targetTitle: string;
   modificationDate?: number;
 }
+interface RevisionObservation { expectedRevision: number; observation: DrawingTitleLeaseObservation; }
 interface Options {
   vault: string;
   journalDirectory: string;
@@ -103,15 +102,14 @@ const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable) : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, stable(item)])) : value;
 const json = (value: unknown) => JSON.stringify(stable(value));
 const equal = (a: unknown, b: unknown) => json(a) === json(b);
-const digestFields = ["fileSha256", "localBodySha256", "documentSha256", "assetRefsSha256", "protectedSha256"] as const;
+const digestFields = ["fileSha256", "localBodySha256", "protectedSha256"] as const;
 function tag(value: unknown): asserts value is string { assert.ok(typeof value === "string" && /^[A-Za-z0-9_.:+-]{1,512}$/.test(value), "Invalid cloud version"); }
 function time(value: unknown): asserts value is number { assert.ok(Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= Number.MAX_SAFE_INTEGER - DRAWING_TITLE_REFRESH_INTERVAL_MS, "Invalid lease time"); }
 function title(value: unknown) { assert.ok(typeof value === "string" && value.length <= 1024 && !/[\r\n\0]/.test(value), "Invalid title"); }
 function file(value: unknown) { assert.ok(typeof value === "string" && value.length <= 4096 && value.endsWith(".md") && !path.isAbsolute(value) && !value.includes("\\") && value.split("/").every(part => part && part !== "." && part !== ".."), "Invalid lease note path"); }
 function hashes(value: Pick<DrawingTitleLeaseIntent, typeof digestFields[number]>) { for (const key of digestFields)
   assert.match(value[key], /^[a-f0-9]{64}$/, "Invalid lease fingerprint"); }
-function normalizeIntent(input: DrawingTitleLeaseIntent): DrawingTitleLeaseIntent {
-  const value = structuredClone(input);
+function validateIntent(value: DrawingTitleLeaseIntent, legacy = false): void {
   // UUID comparisons and storage keys fold case, but CloudKit record names
   // retain the exact observed spelling used by lookup and conditional writes.
   for (const field of ["noteId", "attachmentId", "folderId"] as const) {
@@ -125,56 +123,70 @@ function normalizeIntent(input: DrawingTitleLeaseIntent): DrawingTitleLeaseInten
   title(value.initialAttachmentTitle);
   assert.ok(value.targetTitle && titleIsRepresentable(value.targetTitle), "Invalid target title");
   assert.equal(titleFromNoteFileName(value.file), value.targetTitle, "Target title does not match filename");
-  tag(value.initialNoteTag);
-  tag(value.initialAttachmentTag);
+  if (legacy) {
+    const old = value as unknown as LegacyIntent;
+    tag(old.initialNoteTag); tag(old.initialAttachmentTag);
+    assert.match(old.documentSha256, /^[a-f0-9]{64}$/); assert.match(old.assetRefsSha256, /^[a-f0-9]{64}$/);
+  }
   time(value.initialModificationDate);
   time(value.noteModificationDate);
-  const allowed = ["noteId", "attachmentId", "folderId", "targetTitle", "file", ...digestFields, "initialNoteTitle", "initialAttachmentTitle", "initialNoteTag", "initialAttachmentTag", "initialModificationDate", "noteModificationDate"];
+  const allowed = ["noteId", "attachmentId", "folderId", "targetTitle", "file", ...digestFields, "initialNoteTitle", "initialAttachmentTitle", "initialModificationDate", "noteModificationDate", ...(legacy ? ["initialNoteTag", "initialAttachmentTag", "documentSha256", "assetRefsSha256"] : [])];
   assert.ok(Object.keys(value).length === allowed.length && Object.keys(value).every(key => allowed.includes(key)), "Unknown lease intent fields");
-  return value;
 }
 function observation(value: DrawingTitleLeaseObservation) { file(value.file); hashes(value); tag(value.noteTag); tag(value.attachmentTag); title(value.noteTitle); title(value.attachmentTitle); time(value.modificationDate); }
-function pending(value: Pending) {
+function tokenPhase(value: Pick<Pending, "token" | "phase">) {
   assert.match(value.token, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/, "Invalid request token");
   assert.ok(["A", "B", "refresh"].includes(value.phase), "Invalid lease phase");
+}
+function pending(value: Pending | LegacyPending, legacy = false) {
+  tokenPhase(value);
   tag(value.beforeTags.note);
   tag(value.beforeTags.attachment);
   time(value.issuedAt);
-  title(value.targetTitle);
-  assert.ok(isNoteId(value.recordName), "Invalid pending record");
-  assert.match(value.requestSha256, /^[a-f0-9]{64}$/);
+  if (legacy) {
+    const old = value as LegacyPending;
+    title(old.targetTitle); assert.ok(isNoteId(old.recordName), "Invalid pending record"); assert.match(old.requestSha256, /^[a-f0-9]{64}$/);
+  }
   assert.ok(Object.keys(value.beforeTags).length === 2 && Object.keys(value.beforeTags).every(key => ["note", "attachment"].includes(key)), "Unknown request version fields");
-  assert.ok(Object.keys(value).every(key => ["token", "phase", "beforeTags", "issuedAt", "recordName", "targetTitle", "requestSha256", "outcome", "observedAt"].includes(key)), "Unknown request fields");
+  assert.ok(Object.keys(value).every(key => ["token", "phase", "beforeTags", "issuedAt", ...(legacy ? ["recordName", "targetTitle", "requestSha256", "outcome", "observedAt"] : [])].includes(key)), "Unknown request fields");
 }
-function validEntry(value: DrawingTitleLeaseEntry) {
-  assert.ok(value && value.version === 1 && Number.isSafeInteger(value.revision) && value.revision > 0 && value.revision < Number.MAX_SAFE_INTEGER, "Invalid lease revision");
+function validEntry(value: DrawingTitleLeaseEntry | LegacyEntry) {
+  const legacy = value?.version === 1;
+  assert.ok(value && [1, 2].includes(value.version) && Number.isSafeInteger(value.revision) && value.revision > 0 && value.revision < Number.MAX_SAFE_INTEGER, "Invalid lease revision");
   assert.ok(["attachment", "note", "active", "cancelled"].includes(value.stage), "Invalid lease stage");
-  assert.ok(equal(value.intent, normalizeIntent(value.intent)), "Noncanonical lease identity");
+  validateIntent(value.intent, legacy);
   tag(value.tags.note);
   tag(value.tags.attachment);
   assert.ok(Object.keys(value.tags).length === 2 && Object.keys(value.tags).every(key => ["note", "attachment"].includes(key)), "Unknown lease version fields");
-  assert.ok(Array.isArray(value.recentUncertain) && value.recentUncertain.length <= MAX_UNCERTAIN && Number.isSafeInteger(value.uncertainCount) && value.uncertainCount >= value.recentUncertain.length, "Invalid bounded request history");
+  assert.ok(Array.isArray(value.recentUncertain) && value.recentUncertain.length <= MAX_UNCERTAIN, "Invalid bounded request history");
   for (const receipt of [...value.recentUncertain, ...(value.lastReceipt ? [value.lastReceipt] : [])]) {
-    pending(receipt);
-    time(receipt.observedAt);
+    if (legacy) { pending(receipt as LegacyReceipt, true); time((receipt as LegacyReceipt).observedAt); }
+    else { tokenPhase(receipt); assert.ok(Object.keys(receipt).every(key => ["token", "phase", "outcome"].includes(key)), "Unknown receipt fields"); }
     assert.ok(["sdk-acknowledged", "postcondition-observed", "uncertain"].includes(receipt.outcome), "Invalid receipt outcome");
   }
   assert.ok(value.recentUncertain.every(receipt => receipt.outcome === "uncertain"), "Uncertain attempts cannot become ACKs");
-  if (value.pending) {
-    pending(value.pending);
-    assert.equal(value.pending.targetTitle, value.intent.targetTitle, "Pending title identity changed");
-    assert.equal(value.pending.recordName, value.pending.phase === "A" ? value.intent.attachmentId : value.intent.noteId, "Pending record identity changed");
-    assert.equal(value.pending.requestSha256, requestHash(value.intent, value.pending.phase, value.pending.beforeTags), "Pending request identity changed");
+  if (value.pending !== undefined) {
+    pending(value.pending, legacy);
+    if (value.version === 1) {
+      assert.equal(value.pending.targetTitle, value.intent.targetTitle, "Pending title identity changed");
+      assert.equal(value.pending.recordName, value.pending.phase === "A" ? value.intent.attachmentId : value.intent.noteId, "Pending record identity changed");
+      assert.equal(value.pending.requestSha256, requestHash(value.intent, value.pending.phase, value.pending.beforeTags), "Pending request identity changed");
+    }
     assert.ok(value.stage === "cancelled" || (value.stage === "attachment" ? value.pending.phase === "A" : value.stage === "note" ? value.pending.phase === "B" : value.pending.phase === "refresh"), "Pending phase does not match lease stage");
   }
   if (value.nextDue !== undefined)
     time(value.nextDue);
-  if (value.lastAcknowledgedAt !== undefined)
-    time(value.lastAcknowledgedAt);
+  if (value.version === 1) {
+    assert.ok(Number.isSafeInteger(value.uncertainCount) && value.uncertainCount >= value.recentUncertain.length, "Invalid uncertainty count");
+    if (value.lastAcknowledgedAt !== undefined) time(value.lastAcknowledgedAt);
+    assert.ok(value.cancelReason === undefined || ["observation-changed", "caller-cancelled"].includes(value.cancelReason), "Invalid cancellation reason");
+  } else if (value.legacyContent !== undefined) {
+    assert.match(value.legacyContent.documentSha256, /^[a-f0-9]{64}$/); assert.match(value.legacyContent.assetRefsSha256, /^[a-f0-9]{64}$/);
+    assert.deepEqual(Object.keys(value.legacyContent).sort(), ["assetRefsSha256", "documentSha256"]);
+  }
   assert.ok(value.lastReceipt === undefined || value.lastReceipt.outcome !== "uncertain", "Uncertain receipt cannot be the completed request");
   assert.ok(value.stage !== "active" || value.nextDue !== undefined, "Missing due deadline");
-  assert.ok(value.cancelReason === undefined || ["observation-changed", "caller-cancelled"].includes(value.cancelReason), "Invalid cancellation reason");
-  const allowed = ["version", "revision", "intent", "stage", "tags", "pending", "nextDue", "lastAcknowledgedAt", "lastReceipt", "recentUncertain", "uncertainCount", "cancelReason"];
+  const allowed = ["version", "revision", "intent", "stage", "tags", "pending", "nextDue", "lastReceipt", "recentUncertain", ...(legacy ? ["lastAcknowledgedAt", "cancelReason", "uncertainCount"] : ["legacyContent"])];
   assert.ok(Object.keys(value).every(key => allowed.includes(key)), "Unknown ledger fields");
   assert.ok(Buffer.byteLength(json(value)) <= MAX_BYTES, "Oversized lease");
 }
@@ -183,38 +195,50 @@ function requestHash(intent: DrawingTitleLeaseIntent, phase: Phase, tags: Tags) 
     recordChangeTag: phase === "A" ? tags.attachment : tags.note, targetTitle: intent.targetTitle,
     ...(phase === "B" ? { modificationDate: intent.noteModificationDate } : {}) }));
 }
+/** Validate the original v1 record before projecting away redundant evidence.
+ * Its separate content guards survive until an exact cloud observation checks them. */
+function decodeEntry(value: DrawingTitleLeaseEntry | LegacyEntry): DrawingTitleLeaseEntry {
+  validEntry(value);
+  if (value.version === 2) return value;
+  const { documentSha256, assetRefsSha256, initialNoteTag, initialAttachmentTag, ...intent } = value.intent;
+  const compact = ({ token, phase, outcome }: LegacyReceipt): Receipt => ({ token, phase, outcome });
+  const { pending: old, lastAcknowledgedAt, cancelReason, uncertainCount, lastReceipt, recentUncertain, ...entry } = value;
+  return { ...entry, version: 2, intent, legacyContent: { documentSha256, assetRefsSha256 },
+    ...(old ? { pending: { token: old.token, phase: old.phase, beforeTags: old.beforeTags, issuedAt: old.issuedAt } } : {}),
+    ...(lastReceipt ? { lastReceipt: compact(lastReceipt) } : {}), recentUncertain: recentUncertain.map(compact) };
+}
+function cloudMatches(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation) {
+  return current.protectedSha256 === entry.intent.protectedSha256 && (!entry.legacyContent ||
+    (current.documentSha256 === entry.legacyContent.documentSha256 && current.assetRefsSha256 === entry.legacyContent.assetRefsSha256));
+}
+/** Does not compare local filename/body: a newer filename may supersede a pending request. */
+export function drawingTitlePendingPostcondition(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation): boolean {
+  const pending = entry.pending;
+  return !!pending && cloudMatches(entry, current) && current.attachmentTitle === entry.intent.targetTitle &&
+    (pending.phase === "A" ? current.attachmentTag !== pending.beforeTags.attachment && current.noteTag === pending.beforeTags.note && current.noteTitle === entry.intent.initialNoteTitle && current.modificationDate === entry.intent.initialModificationDate
+      : current.noteTag !== pending.beforeTags.note && current.attachmentTag === pending.beforeTags.attachment && current.noteTitle === entry.intent.targetTitle && current.modificationDate === entry.intent.noteModificationDate);
+}
 async function safeRead(name: string): Promise<string | undefined> {
+  const before = await lstatIfPresent(name);
+  if (!before) return undefined;
+  assert.ok(before.isFile() && !before.isSymbolicLink() && titleStatePermissions(before), "Unsafe ledger file");
   let handle;
+  try { handle = await open(name, constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NOFOLLOW)); }
+  catch (error) { if (isEnoent(error)) return undefined; throw error; }
   try {
-    const before = await lstat(name);
-    assert.ok(before.isFile() && !before.isSymbolicLink() && titleStatePermissions(before), "Unsafe ledger file");
-    handle = await open(name, constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NOFOLLOW));
-    const after = await handle.stat();
-    assert.ok(after.dev === before.dev && after.ino === before.ino, "Ledger file changed while opening");
-  }
-  catch (error) {
-    await handle?.close();
-    if (isEnoent(error))
-      return undefined;
-    throw error;
-  }
-  try {
-    const stat = await handle.stat();
-    assert.ok(stat.isFile() && titleStatePermissions(stat) && stat.size <= MAX_BYTES, "Unsafe ledger file");
+    const stat = await handle.stat({ bigint: true });
+    assert.ok(stat.dev === before.dev && stat.ino === before.ino, "Ledger file changed while opening");
+    assert.ok(stat.isFile() && titleStatePermissions(stat) && stat.size <= BigInt(MAX_BYTES), "Unsafe ledger file");
     const bytes = Buffer.alloc(MAX_BYTES + 1);
     let offset = 0;
     while (offset < bytes.length) {
       const read = await handle.read(bytes, offset, bytes.length - offset, offset);
-      if (!read.bytesRead)
-        break;
+      if (!read.bytesRead) break;
       offset += read.bytesRead;
     }
     assert.ok(offset <= MAX_BYTES, "Oversized ledger file");
     return bytes.subarray(0, offset).toString("utf8");
-  }
-  finally {
-    await handle.close();
-  }
+  } finally { await handle.close(); }
 }
 async function canonicalStoreRoot(directory: string): Promise<string> {
   let parent = path.dirname(directory);
@@ -240,17 +264,11 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     let current = path.parse(directory).root;
     for (const part of path.relative(current, directory).split(path.sep).filter(Boolean)) {
       current = path.join(current, part);
-      try {
-        const stat = await lstat(current);
-        assert.ok(stat.isDirectory() && !stat.isSymbolicLink(), "Unsafe journal ancestry");
-        if (current === root || current === leasesRoot || current === directory)
-          assert.ok(titleStatePermissions(stat), "Unsafe private journal directory");
-      }
-      catch (error) {
-        if (isEnoent(error))
-          break;
-        throw error;
-      }
+      const stat = await lstatIfPresent(current);
+      if (!stat) break;
+      assert.ok(stat.isDirectory() && !stat.isSymbolicLink(), "Unsafe journal ancestry");
+      if (current === root || current === leasesRoot || current === directory)
+        assert.ok(titleStatePermissions(stat), "Unsafe private journal directory");
     }
     const metadata = await lstat(path.dirname(pin));
     assert.ok(metadata.isDirectory() && !metadata.isSymbolicLink() && titleStatePermissions(metadata, false), "Unsafe vault metadata directory");
@@ -269,8 +287,13 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     try { return await run(assertHeld); } finally { operationActive = false; }
   }
   const name = (noteId: string) => { assert.ok(isNoteId(noteId)); return path.join(directory, sha(JSON.stringify([vault, options.accountDsidSha256, noteId.toUpperCase()])) + ".json"); };
-  async function readUnlocked(noteId: string) { await safePaths(); const raw = await safeRead(name(noteId)); if (raw === undefined)
-    return undefined; const entry = JSON.parse(raw) as DrawingTitleLeaseEntry; validEntry(entry); assert.equal(entry.intent.noteId.toUpperCase(), noteId.toUpperCase(), "Wrong ledger note"); return entry; }
+  async function readUnlocked(noteId: string, assertHeld = activeWriter) {
+    await safePaths(); const raw = await safeRead(name(noteId)); if (raw === undefined) return undefined;
+    const stored = JSON.parse(raw) as DrawingTitleLeaseEntry | LegacyEntry, entry = decodeEntry(stored);
+    assert.equal(entry.intent.noteId.toUpperCase(), noteId.toUpperCase(), "Wrong ledger note");
+    if (stored.version === 1 && assertHeld) await persist(noteId, entry, assertHeld);
+    return entry;
+  }
   async function storage() {
     await safePaths();
     await privateTitleStateDirectory(root);
@@ -283,14 +306,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
   }
   async function persist(noteId: string, entry: DrawingTitleLeaseEntry, assertHeld: () => Promise<void>) {
     validEntry(entry);
-    await safePaths();
-    await privateTitleStateDirectory(root);
-    await privateTitleStateDirectory(directory);
-    const wanted = await identity(), existing = await safeRead(pin);
-    if (existing === undefined)
-      await createPrivateTitleState(pin, wanted);
-    else
-      assert.equal(existing, wanted, "Title journal authority changed");
+    await storage();
     const destination = name(noteId), temporary = destination + ".next";
     if (await safeRead(temporary) !== undefined)
       await unlink(temporary);
@@ -309,75 +325,68 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     await syncTitleDirectory(directory, drawingTitleLedgerDurability.sync);
     await syncTitleDirectory(root, drawingTitleLedgerDurability.sync);
   }
-  async function change<T>(noteId: string, expectedRevision: number | undefined, run: (entry: DrawingTitleLeaseEntry | undefined, now: number) => {
+  async function change(noteId: string, expectedRevision: number | undefined, run: (entry: DrawingTitleLeaseEntry | undefined, now: number) => {
     entry: DrawingTitleLeaseEntry;
-    result: (entry: DrawingTitleLeaseEntry) => T;
-    changed?: boolean;
-  }) {
+    dispatch?: DrawingTitleLeaseDispatch;
+  }): Promise<DrawingTitleLeaseClaim> {
     return operation(async assertHeld => {
-        const entry = await readUnlocked(noteId);
-        assert.equal(entry?.revision, expectedRevision, "Stale lease revision");
-        const now = ports.now();
-        time(now);
-        const decision = run(entry && structuredClone(entry), now);
-        if (decision.changed !== false) {
-          decision.entry.revision = (entry?.revision ?? 0) + 1;
-          await persist(noteId, decision.entry, assertHeld);
-        }
-        return decision.result(structuredClone(decision.entry));
+      const entry = await readUnlocked(noteId, assertHeld);
+      assert.equal(entry?.revision, expectedRevision, "Stale lease revision");
+      const now = ports.now(); time(now);
+      const decision = run(entry && structuredClone(entry), now);
+      if (!equal(entry, decision.entry)) {
+        decision.entry.revision = (entry?.revision ?? 0) + 1;
+        await persist(noteId, decision.entry, assertHeld);
+      }
+      return { entry: structuredClone(decision.entry), dispatch: decision.dispatch };
     });
   }
-  function common(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation) { return current.file === entry.intent.file && digestFields.every(field => current[field] === entry.intent[field]); }
-  function stateMatches(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation, after: boolean) {
+  function common(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation) { return current.file === entry.intent.file && current.fileSha256 === entry.intent.fileSha256 && current.localBodySha256 === entry.intent.localBodySha256 && cloudMatches(entry, current); }
+  function stateMatches(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation) {
     const phase = entry.pending?.phase ?? (entry.stage === "attachment" ? "A" : entry.stage === "note" ? "B" : "refresh"), wanted = entry.intent;
-    const expectedNote = phase === "refresh" || (after && phase === "B") ? wanted.targetTitle : wanted.initialNoteTitle;
-    const expectedDrawing = phase !== "A" || after ? wanted.targetTitle : wanted.initialAttachmentTitle;
-    const expectedDate = phase === "refresh" || (after && phase === "B") ? wanted.noteModificationDate : wanted.initialModificationDate;
+    const expectedNote = phase === "refresh" ? wanted.targetTitle : wanted.initialNoteTitle;
+    const expectedDrawing = phase !== "A" ? wanted.targetTitle : wanted.initialAttachmentTitle;
+    const expectedDate = phase === "refresh" ? wanted.noteModificationDate : wanted.initialModificationDate;
     return common(entry, current) && current.noteTitle === expectedNote && current.attachmentTitle === expectedDrawing && current.modificationDate === expectedDate;
   }
-  function cancelEntry(entry: DrawingTitleLeaseEntry) { entry.stage = "cancelled"; entry.cancelReason = "observation-changed"; delete entry.nextDue; }
-  function archive(entry: DrawingTitleLeaseEntry, pending: Pending, now: number) { entry.recentUncertain = [...entry.recentUncertain, { ...pending, outcome: "uncertain" as const, observedAt: now }].slice(-MAX_UNCERTAIN); entry.uncertainCount += 1; }
+  function cancelEntry(entry: DrawingTitleLeaseEntry) { entry.stage = "cancelled"; delete entry.nextDue; }
+  function archive(entry: DrawingTitleLeaseEntry, pending: Pending) { entry.recentUncertain = [...entry.recentUncertain, { token: pending.token, phase: pending.phase, outcome: "uncertain" as const }].slice(-MAX_UNCERTAIN); }
   function finish(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation, now: number, outcome: Receipt["outcome"]) {
     const pending = entry.pending!;
     if (outcome === "postcondition-observed")
-      archive(entry, pending, now);
-    entry.lastReceipt = { ...pending, outcome, observedAt: now };
+      archive(entry, pending);
+    entry.lastReceipt = { token: pending.token, phase: pending.phase, outcome };
     entry.tags = { note: current.noteTag, attachment: current.attachmentTag };
     delete entry.pending;
     if (pending.phase === "A")
       entry.stage = "note";
     else {
       entry.stage = "active";
-      if (outcome === "sdk-acknowledged")
-        entry.lastAcknowledgedAt = now;
       entry.nextDue = Math.max(now, pending.issuedAt) + DRAWING_TITLE_REFRESH_INTERVAL_MS;
     }
   }
-  async function resolve(noteId: string, args: {
-    expectedRevision: number;
-    token?: string;
-    observation: DrawingTitleLeaseObservation;
-  }, acknowledged: boolean) {
+  async function resolve(noteId: string, args: RevisionObservation & { token?: string }, acknowledged: boolean) {
     observation(args.observation);
-    return change(noteId, args.expectedRevision, (entry, now) => {
+    return (await change(noteId, args.expectedRevision, (entry, now) => {
       assert.ok(entry?.pending, "No pending title request");
       if (acknowledged)
         assert.equal(args.token, entry.pending.token, "Wrong request token");
+      if (cloudMatches(entry, args.observation)) delete entry.legacyContent;
       const pending = entry.pending, current = args.observation, targetChanged = pending.phase === "A" ? current.attachmentTag !== pending.beforeTags.attachment : current.noteTag !== pending.beforeTags.note;
       const untouchedSame = pending.phase === "A" ? current.noteTag === pending.beforeTags.note : current.attachmentTag === pending.beforeTags.attachment;
-      if (entry.stage !== "cancelled" && targetChanged && untouchedSame && stateMatches(entry, current, true))
+      if (entry.stage !== "cancelled" && common(entry, current) && drawingTitlePendingPostcondition(entry, current))
         finish(entry, current, now, acknowledged ? "sdk-acknowledged" : "postcondition-observed");
-      else if (!stateMatches(entry, current, false) || !untouchedSame || entry.stage === "cancelled") {
+      else if (!stateMatches(entry, current) || !untouchedSame || entry.stage === "cancelled") {
         cancelEntry(entry);
         if (targetChanged) {
-          archive(entry, pending, now);
+          archive(entry, pending);
           delete entry.pending;
         }
       }
       else
-        return { entry, result: (value: DrawingTitleLeaseEntry) => value, changed: false };
-      return { entry, result: (value: DrawingTitleLeaseEntry) => value };
-    });
+        return { entry };
+      return { entry };
+    })).entry;
   }
   return {
     /** Bind planning, dispatch and final bookkeeping to one participating run. */
@@ -393,7 +402,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     /** Hold execution ownership through the final checks and single SDK call.
      * The callback must not invoke ledger mutations; acknowledge afterwards. */
     withDispatch: async <T>(noteId: string, args: { expectedRevision: number; token: string }, send: () => Promise<T>): Promise<T> => operation(async assertHeld => {
-        const entry = await readUnlocked(noteId);
+        const entry = await readUnlocked(noteId, assertHeld);
         assert.ok(entry && entry.revision === args.expectedRevision && entry.pending && entry.pending.token === args.token && entry.stage !== "cancelled", "Stale or cancelled dispatch authority");
         const now = ports.now(); time(now);
         assert.ok(now >= entry.pending.issuedAt && now - entry.pending.issuedAt <= DRAWING_TITLE_REFRESH_INTERVAL_MS, "Expired title dispatch authority");
@@ -402,7 +411,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
         await assertHeld();
         return result;
     }),
-    read: readUnlocked,
+    read: (noteId: string) => readUnlocked(noteId),
     listNoteIds: async () => { await safePaths(); let files; try {
       files = await readdir(directory);
     }
@@ -416,68 +425,61 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
       if (!item.endsWith(".json")) { await safeRead(path.join(directory, item)); continue; }
       const raw = await safeRead(path.join(directory, item));
       assert.ok(raw);
-      const entry = JSON.parse(raw) as DrawingTitleLeaseEntry;
-      validEntry(entry);
+      const entry = decodeEntry(JSON.parse(raw) as DrawingTitleLeaseEntry | LegacyEntry);
       assert.equal(path.basename(name(entry.intent.noteId)), item, "Wrong ledger scope");
       ids.push(entry.intent.noteId);
     } return ids.sort(); },
-    register: async (input: DrawingTitleLeaseIntent, args: {
+    register: async (input: DrawingTitleLeaseRegistration, args: {
       expectedRevision?: number;
     } = {}) => {
-      const intent = normalizeIntent(input);
-      return change(intent.noteId, args.expectedRevision, entry => {
+      const { initialNoteTag, initialAttachmentTag, ...data } = input;
+      tag(initialNoteTag); tag(initialAttachmentTag);
+      validateIntent(data);
+      const intent = data;
+      return (await change(intent.noteId, args.expectedRevision, entry => {
         const binding = (value: DrawingTitleLeaseIntent) => ({ noteId: value.noteId.toUpperCase(), attachmentId: value.attachmentId.toUpperCase(), folderId: value.folderId.toUpperCase(), targetTitle: value.targetTitle, file: value.file, ...Object.fromEntries(digestFields.map(field => [field, value[field]])) });
         if (entry && equal(binding(entry.intent), binding(intent)))
-          return { entry, changed: false, result: (value: DrawingTitleLeaseEntry) => value };
+          return { entry };
         assert.ok(!entry?.pending, "Pending title request cannot be replaced");
-        return { entry: { version: 1 as const, revision: 1, intent, stage: "attachment" as const, tags: { note: intent.initialNoteTag, attachment: intent.initialAttachmentTag }, recentUncertain: entry?.recentUncertain ?? [], uncertainCount: entry?.uncertainCount ?? 0 }, result: (value: DrawingTitleLeaseEntry) => value };
-      });
+        return { entry: { version: 2 as const, revision: 1, intent, stage: "attachment" as const, tags: { note: initialNoteTag, attachment: initialAttachmentTag }, recentUncertain: entry?.recentUncertain ?? [] } };
+      })).entry;
     },
-    claim: async (noteId: string, args: {
-      expectedRevision: number;
-      observation: DrawingTitleLeaseObservation;
-    }) => {
+    claim: async (noteId: string, args: RevisionObservation) => {
       observation(args.observation);
-      return change<DrawingTitleLeaseClaim>(noteId, args.expectedRevision, (entry, now) => {
+      return change(noteId, args.expectedRevision, (entry, now) => {
         assert.ok(entry, "Missing title lease");
         const current = args.observation;
+        if (cloudMatches(entry, current)) delete entry.legacyContent;
         if (entry.stage === "cancelled")
-          return { entry, result: (value: DrawingTitleLeaseEntry) => ({ entry: value, dispatch: undefined }), changed: false };
-        if (!stateMatches(entry, current, false)) {
+          return { entry };
+        if (!stateMatches(entry, current)) {
           cancelEntry(entry);
-          return { entry, result: (value: DrawingTitleLeaseEntry) => ({ entry: value, dispatch: undefined }) };
+          return { entry };
         }
         if (entry.pending) {
           if (entry.pending.phase !== "refresh" || now < entry.pending.issuedAt + DRAWING_TITLE_REFRESH_INTERVAL_MS)
-            return { entry, result: (value: DrawingTitleLeaseEntry) => ({ entry: value, dispatch: undefined }), changed: false };
-          archive(entry, entry.pending, now); // A new rate-limited request, never replay or ACK.
+            return { entry };
+          archive(entry, entry.pending); // A new rate-limited request, never replay or ACK.
         }
         else if (entry.stage === "active" && now < entry.nextDue!)
-          return { entry, result: (value: DrawingTitleLeaseEntry) => ({ entry: value, dispatch: undefined }), changed: false };
+          return { entry };
         if (entry.stage !== "active" && (current.noteTag !== entry.tags.note || current.attachmentTag !== entry.tags.attachment)) {
           cancelEntry(entry);
-          return { entry, result: (value: DrawingTitleLeaseEntry) => ({ entry: value, dispatch: undefined }) };
+          return { entry };
         }
         const phase: Phase = entry.stage === "attachment" ? "A" : entry.stage === "note" ? "B" : "refresh";
         const tags = { note: current.noteTag, attachment: current.attachmentTag };
-        const request: Pending = { token: randomUUID(), phase, beforeTags: tags, issuedAt: now, recordName: phase === "A" ? entry.intent.attachmentId : entry.intent.noteId, targetTitle: entry.intent.targetTitle, requestSha256: requestHash(entry.intent, phase, tags) };
+        const request: Pending = { token: randomUUID(), phase, beforeTags: tags, issuedAt: now };
         entry.pending = request;
         const dispatch: DrawingTitleLeaseDispatch = { token: request.token, phase, recordName: phase === "A" ? entry.intent.attachmentId : entry.intent.noteId, recordChangeTag: phase === "A" ? current.attachmentTag : current.noteTag, targetTitle: entry.intent.targetTitle, ...(phase === "B" ? { modificationDate: entry.intent.noteModificationDate } : {}) };
-        return { entry, result: (value: DrawingTitleLeaseEntry) => ({ entry: value, dispatch }) };
+        return { entry, dispatch };
       });
     },
-    acknowledge: (noteId: string, args: {
-      expectedRevision: number;
-      token: string;
-      observation: DrawingTitleLeaseObservation;
-    }) => resolve(noteId, args, true),
-    resolvePending: (noteId: string, args: {
-      expectedRevision: number;
-      observation: DrawingTitleLeaseObservation;
-    }) => resolve(noteId, args, false),
-    cancel: (noteId: string, args: {
+    acknowledge: (noteId: string, args: RevisionObservation & { token: string }) => resolve(noteId, args, true),
+    resolvePending: (noteId: string, args: RevisionObservation) => resolve(noteId, args, false),
+    cancel: async (noteId: string, args: {
       expectedRevision: number;
       reason: string;
-    }) => change(noteId, args.expectedRevision, entry => { assert.ok(entry); entry.stage = "cancelled"; entry.cancelReason = "caller-cancelled"; delete entry.nextDue; return { entry, result: (value: DrawingTitleLeaseEntry) => value }; }),
+    }) => (await change(noteId, args.expectedRevision, entry => { assert.ok(entry); cancelEntry(entry); return { entry }; })).entry,
   };
 }
