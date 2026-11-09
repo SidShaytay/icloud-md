@@ -390,11 +390,14 @@ A few consequences worth knowing before you pick:
   you asked for locally takes the same road, which is why renaming is always
   something `pull` does and never something `push` does.
 - **Scan/drawing-first notes keep their attachments and independent title.**
-  New exports name them from Apple's display title, or `Untitled` if none is
+  Exports name them from Apple's display title, or `Untitled` if none is
   usable, rather than from an object-replacement symbol. Filename or
   `apple-note-title` changes are refused: cloud display metadata alone does not
   reliably retitle native Apple Notes. Retitle in Notes, then pull. Existing
-  attachment-body restrictions still apply.
+  attachment-body restrictions still apply. Existing filename-mode vaults
+  refresh these names on their first pull after upgrading, preserving local
+  edits and leaving deleted or hand-renamed files alone. In-body vaults keep
+  their existing names.
 - **The mode is chosen once.** Switching an existing vault between the two
   shapes isn't supported yet: it would have to rewrite every file in the
   vault, which is a different (and more dangerous) operation than the
