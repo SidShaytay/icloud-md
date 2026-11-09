@@ -221,8 +221,11 @@ list name; a later scheduled Linux title-only refresh corrected it. Reopening
 Notes and another normal sync retained the second name. Cloud and native document
 bytes, all five assets, attachment references and note identity stayed unchanged.
 Paired measurements for the second refresh also preserved local Markdown/base
-bytes, mtime and inode. iPhone visual verification is still pending; cloud
-acknowledgements alone do not complete that acceptance check.
+bytes, mtime and inode. On 2026-11-08, the owner confirmed the final iPhone
+check: the second title remained after reopening Notes, with exactly one intact
+drawing and no added text heading. The iPhone check covers the final title; the
+two intermediate rename cycles were verified on the Mac. Native confirmation is
+recorded separately from cloud acknowledgements.
 
 The checked experimental caller is `attachmentTitleRunner.ts`, launched through
 `integration/runAttachmentTitleProbe` on Linux. It verifies the unchanged local
