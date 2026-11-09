@@ -266,3 +266,14 @@ test("serializePlanEntry carries a remark through to --json, and omits it when a
     resolution: "ready",
   });
 });
+
+
+test("local filename settlement is serialized and listed without counting a remote move", () => {
+  const entry: PlanEntry = { kind: "move", file: "Notes/New.md", previousFile: "Notes/Old.md", resolution: "ready", localOnly: true,
+    remark: "title already matches; update local filename tracking only" };
+  assert.equal(serializePlanEntry(entry).localOnly, true);
+  assert.equal("localOnly" in serializePlanEntry({ kind: "update", file: "Notes/Text.md", resolution: "ready" }), false);
+  const lines = renderPlan([entry]);
+  assert.ok(lines.some(line => line.includes(entry.remark!)));
+  assert.equal(lines.at(-1), "0 to create, 0 changed, 0 to delete.");
+});

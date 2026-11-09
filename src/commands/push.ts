@@ -308,13 +308,16 @@ export async function buildPushPlan(
         `pushed - move a note to another folder to sync it: ${strays.join(", ")}`,
     });
   }
+  const localFileContents = new Map<string, string>();
   for (const file of markdownFiles.files) {
     // Body only for the note itself: an untracked file's local-only
     // frontmatter never reaches parse/create or move-matching (which
     // compares against body-only base copies). The envelope is still read
     // here, because in an id-recording vault it carries the one thing that
     // says which note this file *is*.
-    const { frontmatter, body } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"), { filenameAsTitle });
+    const raw = await readFile(path.join(targetDir, file), "utf-8");
+    localFileContents.set(file, raw);
+    const { frontmatter, body } = splitFrontmatter(raw, { filenameAsTitle });
     untracked.push({
       file,
       localText: body,
@@ -947,6 +950,35 @@ export async function buildPushPlan(
     }
 
     const folderRecordName = pair.folderRecordName;
+    const classifiedMove = classifyNoteRecord(record, { titleMode });
+    if (!pair.relocated && pair.newTitle !== undefined && retitle === undefined &&
+        classifiedMove.status === "ok" && classifiedMove.titleInMetadata) {
+      if ((record.fields.Folder?.value as { recordName?: string } | undefined)?.recordName !== folderRecordName) {
+        entries.push({ ...base, resolution: "conflict", reason: 'remote folder no longer matches - run "pull" first' });
+        continue;
+      }
+      const originalContents = localFileContents.get(pair.toFile);
+      const originalBase = await readBaseCopy(targetDir, pair.recordName);
+      entries.push({ ...base, resolution: "ready", localOnly: true,
+        remark: "title already matches; update local filename tracking only",
+        execute: async () => {
+          // A preview is not authority to settle a newer local or remote intent.
+          const [fresh] = await lookupRecords(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, [pair.recordName]);
+          if (!fresh || fresh.deleted || fresh.recordChangeTag !== record.recordChangeTag) {
+            return { succeeded: false, message: `${pair.toFile}: cloud changed before filename bookkeeping; check again` };
+          }
+          try {
+            if (await readFile(path.join(targetDir, pair.toFile), "utf-8") !== originalContents ||
+                await readBaseCopy(targetDir, pair.recordName) !== originalBase) throw Error("Local intent changed");
+          } catch {
+            return { succeeded: false, message: `${pair.toFile}: local intent changed before filename bookkeeping; check again` };
+          }
+          state.notes[pair.recordName] = { ...pair.entry, file: pair.toFile, frontmatterTitle: pair.recordedTitle };
+          return { succeeded: true, message: `Settled ${pair.entry.file} -> ${pair.toFile} without a cloud write` };
+        },
+      });
+      continue;
+    }
     entries.push({
       ...base,
       resolution: "ready",
@@ -1509,7 +1541,7 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
       continue;
     }
     const outcome = await entry.execute();
-    if (entry.resolution === "ready" && outcome.succeeded) {
+    if (entry.resolution === "ready" && outcome.succeeded && !entry.localOnly) {
       pushed += 1;
     }
     results.push({ ...serializePlanEntry(entry), outcome });
