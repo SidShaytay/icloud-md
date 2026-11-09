@@ -33,11 +33,6 @@ Keep the state directory outside the vault, private to your user account, and at
 one stable location. It holds bounded rename progress, not raw cloud records or
 signed asset URLs. Changing or deleting it is not a safe way to force a retry.
 
-Existing progress records are converted when a title push opens them for writing.
-Preview leaves them untouched. Conversion preserves pending requests and refresh
-deadlines; older development builds cannot read the new format. Keep the previous
-store backup when upgrading, and do not alternate old and new builds.
-
 Folder and note filters are optional and repeatable. A note must match both
 filter groups when both are supplied; alternatives within each group are allowed.
 The note UUID is in its `apple-note-id` frontmatter. Its folder UUID is the

@@ -40,7 +40,6 @@ function observe(local: LocalIntent, records: CloudKitRecord[], request: Drawing
   const modificationDate = note.fields.ModificationDate;
   assert.ok(modificationDate?.type === "TIMESTAMP" && typeof modificationDate.value === "number" && Number.isSafeInteger(modificationDate.value) && modificationDate.value >= 0, "Invalid note modification date");
   return { file: local.file, fileSha256: local.fileSha256, localBodySha256: local.baseSha256,
-    documentSha256: captured.documentSha256, assetRefsSha256: captured.assetRefsSha256,
     protectedSha256: sha(json([captured.protectedSha256, folders.map(({ recordChangeTag, modified, ...record }) => record)])), noteTag: note.recordChangeTag!, attachmentTag: attachment.recordChangeTag!,
     noteTitle: title(note, "TitleEncrypted"), attachmentTitle: title(attachment, "UserTitle"), modificationDate: modificationDate.value,
   };

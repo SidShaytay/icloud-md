@@ -31,8 +31,6 @@ export interface DrawingTitleLeaseObservation {
   file: string;
   fileSha256: string;
   localBodySha256: string;
-  documentSha256: string;
-  assetRefsSha256: string;
   protectedSha256: string;
   noteTag: string;
   attachmentTag: string;
@@ -65,15 +63,7 @@ export interface DrawingTitleLeaseEntry {
   nextDue?: number;
   lastReceipt?: Receipt;
   recentUncertain: Receipt[];
-  legacyContent?: Pick<DrawingTitleLeaseObservation, "documentSha256" | "assetRefsSha256">;
 }
-type LegacyIntent = DrawingTitleLeaseRegistration & Pick<DrawingTitleLeaseObservation, "documentSha256" | "assetRefsSha256">;
-type LegacyPending = Pending & { recordName: string; targetTitle: string; requestSha256: string };
-type LegacyReceipt = LegacyPending & Pick<Receipt, "outcome"> & { observedAt: number };
-type LegacyEntry = Omit<DrawingTitleLeaseEntry, "version" | "intent" | "pending" | "lastReceipt" | "recentUncertain" | "legacyContent"> & {
-  version: 1; intent: LegacyIntent; pending?: LegacyPending; lastReceipt?: LegacyReceipt;
-  recentUncertain: LegacyReceipt[]; uncertainCount: number; lastAcknowledgedAt?: number; cancelReason?: string;
-};
 export interface DrawingTitleLeaseClaim {
   entry: DrawingTitleLeaseEntry;
   dispatch: DrawingTitleLeaseDispatch | undefined;
@@ -109,7 +99,7 @@ function title(value: unknown) { assert.ok(typeof value === "string" && value.le
 function file(value: unknown) { assert.ok(typeof value === "string" && value.length <= 4096 && value.endsWith(".md") && !path.isAbsolute(value) && !value.includes("\\") && value.split("/").every(part => part && part !== "." && part !== ".."), "Invalid lease note path"); }
 function hashes(value: Pick<DrawingTitleLeaseIntent, typeof digestFields[number]>) { for (const key of digestFields)
   assert.match(value[key], /^[a-f0-9]{64}$/, "Invalid lease fingerprint"); }
-function validateIntent(value: DrawingTitleLeaseIntent, legacy = false): void {
+function validateIntent(value: DrawingTitleLeaseIntent): void {
   // UUID comparisons and storage keys fold case, but CloudKit record names
   // retain the exact observed spelling used by lookup and conditional writes.
   for (const field of ["noteId", "attachmentId", "folderId"] as const) {
@@ -123,14 +113,9 @@ function validateIntent(value: DrawingTitleLeaseIntent, legacy = false): void {
   title(value.initialAttachmentTitle);
   assert.ok(value.targetTitle && titleIsRepresentable(value.targetTitle), "Invalid target title");
   assert.equal(titleFromNoteFileName(value.file), value.targetTitle, "Target title does not match filename");
-  if (legacy) {
-    const old = value as unknown as LegacyIntent;
-    tag(old.initialNoteTag); tag(old.initialAttachmentTag);
-    assert.match(old.documentSha256, /^[a-f0-9]{64}$/); assert.match(old.assetRefsSha256, /^[a-f0-9]{64}$/);
-  }
   time(value.initialModificationDate);
   time(value.noteModificationDate);
-  const allowed = ["noteId", "attachmentId", "folderId", "targetTitle", "file", ...digestFields, "initialNoteTitle", "initialAttachmentTitle", "initialModificationDate", "noteModificationDate", ...(legacy ? ["initialNoteTag", "initialAttachmentTag", "documentSha256", "assetRefsSha256"] : [])];
+  const allowed = ["noteId", "attachmentId", "folderId", "targetTitle", "file", ...digestFields, "initialNoteTitle", "initialAttachmentTitle", "initialModificationDate", "noteModificationDate"];
   assert.ok(Object.keys(value).length === allowed.length && Object.keys(value).every(key => allowed.includes(key)), "Unknown lease intent fields");
 }
 function observation(value: DrawingTitleLeaseObservation) { file(value.file); hashes(value); tag(value.noteTag); tag(value.attachmentTag); title(value.noteTitle); title(value.attachmentTitle); time(value.modificationDate); }
@@ -138,83 +123,45 @@ function tokenPhase(value: Pick<Pending, "token" | "phase">) {
   assert.match(value.token, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/, "Invalid request token");
   assert.ok(["A", "B", "refresh"].includes(value.phase), "Invalid lease phase");
 }
-function pending(value: Pending | LegacyPending, legacy = false) {
+function pending(value: Pending) {
   tokenPhase(value);
   tag(value.beforeTags.note);
   tag(value.beforeTags.attachment);
   time(value.issuedAt);
-  if (legacy) {
-    const old = value as LegacyPending;
-    title(old.targetTitle); assert.ok(isNoteId(old.recordName), "Invalid pending record"); assert.match(old.requestSha256, /^[a-f0-9]{64}$/);
-  }
   assert.ok(Object.keys(value.beforeTags).length === 2 && Object.keys(value.beforeTags).every(key => ["note", "attachment"].includes(key)), "Unknown request version fields");
-  assert.ok(Object.keys(value).every(key => ["token", "phase", "beforeTags", "issuedAt", ...(legacy ? ["recordName", "targetTitle", "requestSha256", "outcome", "observedAt"] : [])].includes(key)), "Unknown request fields");
+  assert.ok(Object.keys(value).every(key => ["token", "phase", "beforeTags", "issuedAt"].includes(key)), "Unknown request fields");
 }
-function validEntry(value: DrawingTitleLeaseEntry | LegacyEntry) {
-  const legacy = value?.version === 1;
-  assert.ok(value && [1, 2].includes(value.version) && Number.isSafeInteger(value.revision) && value.revision > 0 && value.revision < Number.MAX_SAFE_INTEGER, "Invalid lease revision");
+function validEntry(value: DrawingTitleLeaseEntry) {
+  assert.ok(value && value.version === 2, "Unsupported drawing title ledger version: expected 2");
+  assert.ok(Number.isSafeInteger(value.revision) && value.revision > 0 && value.revision < Number.MAX_SAFE_INTEGER, "Invalid lease revision");
   assert.ok(["attachment", "note", "active", "cancelled"].includes(value.stage), "Invalid lease stage");
-  validateIntent(value.intent, legacy);
+  validateIntent(value.intent);
   tag(value.tags.note);
   tag(value.tags.attachment);
   assert.ok(Object.keys(value.tags).length === 2 && Object.keys(value.tags).every(key => ["note", "attachment"].includes(key)), "Unknown lease version fields");
   assert.ok(Array.isArray(value.recentUncertain) && value.recentUncertain.length <= MAX_UNCERTAIN, "Invalid bounded request history");
   for (const receipt of [...value.recentUncertain, ...(value.lastReceipt ? [value.lastReceipt] : [])]) {
-    if (legacy) { pending(receipt as LegacyReceipt, true); time((receipt as LegacyReceipt).observedAt); }
-    else { tokenPhase(receipt); assert.ok(Object.keys(receipt).every(key => ["token", "phase", "outcome"].includes(key)), "Unknown receipt fields"); }
+    tokenPhase(receipt);
+    assert.ok(Object.keys(receipt).every(key => ["token", "phase", "outcome"].includes(key)), "Unknown receipt fields");
     assert.ok(["sdk-acknowledged", "postcondition-observed", "uncertain"].includes(receipt.outcome), "Invalid receipt outcome");
   }
   assert.ok(value.recentUncertain.every(receipt => receipt.outcome === "uncertain"), "Uncertain attempts cannot become ACKs");
   if (value.pending !== undefined) {
-    pending(value.pending, legacy);
-    if (value.version === 1) {
-      assert.equal(value.pending.targetTitle, value.intent.targetTitle, "Pending title identity changed");
-      assert.equal(value.pending.recordName, value.pending.phase === "A" ? value.intent.attachmentId : value.intent.noteId, "Pending record identity changed");
-      assert.equal(value.pending.requestSha256, requestHash(value.intent, value.pending.phase, value.pending.beforeTags), "Pending request identity changed");
-    }
+    pending(value.pending);
     assert.ok(value.stage === "cancelled" || (value.stage === "attachment" ? value.pending.phase === "A" : value.stage === "note" ? value.pending.phase === "B" : value.pending.phase === "refresh"), "Pending phase does not match lease stage");
   }
   if (value.nextDue !== undefined)
     time(value.nextDue);
-  if (value.version === 1) {
-    assert.ok(Number.isSafeInteger(value.uncertainCount) && value.uncertainCount >= value.recentUncertain.length, "Invalid uncertainty count");
-    if (value.lastAcknowledgedAt !== undefined) time(value.lastAcknowledgedAt);
-    assert.ok(value.cancelReason === undefined || ["observation-changed", "caller-cancelled"].includes(value.cancelReason), "Invalid cancellation reason");
-  } else if (value.legacyContent !== undefined) {
-    assert.match(value.legacyContent.documentSha256, /^[a-f0-9]{64}$/); assert.match(value.legacyContent.assetRefsSha256, /^[a-f0-9]{64}$/);
-    assert.deepEqual(Object.keys(value.legacyContent).sort(), ["assetRefsSha256", "documentSha256"]);
-  }
   assert.ok(value.lastReceipt === undefined || value.lastReceipt.outcome !== "uncertain", "Uncertain receipt cannot be the completed request");
   assert.ok(value.stage !== "active" || value.nextDue !== undefined, "Missing due deadline");
-  const allowed = ["version", "revision", "intent", "stage", "tags", "pending", "nextDue", "lastReceipt", "recentUncertain", ...(legacy ? ["lastAcknowledgedAt", "cancelReason", "uncertainCount"] : ["legacyContent"])];
+  const allowed = ["version", "revision", "intent", "stage", "tags", "pending", "nextDue", "lastReceipt", "recentUncertain"];
   assert.ok(Object.keys(value).every(key => allowed.includes(key)), "Unknown ledger fields");
   assert.ok(Buffer.byteLength(json(value)) <= MAX_BYTES, "Oversized lease");
-}
-function requestHash(intent: DrawingTitleLeaseIntent, phase: Phase, tags: Tags) {
-  return sha(json({ phase, recordName: phase === "A" ? intent.attachmentId : intent.noteId,
-    recordChangeTag: phase === "A" ? tags.attachment : tags.note, targetTitle: intent.targetTitle,
-    ...(phase === "B" ? { modificationDate: intent.noteModificationDate } : {}) }));
-}
-/** Validate the original v1 record before projecting away redundant evidence.
- * Its separate content guards survive until an exact cloud observation checks them. */
-function decodeEntry(value: DrawingTitleLeaseEntry | LegacyEntry): DrawingTitleLeaseEntry {
-  validEntry(value);
-  if (value.version === 2) return value;
-  const { documentSha256, assetRefsSha256, initialNoteTag, initialAttachmentTag, ...intent } = value.intent;
-  const compact = ({ token, phase, outcome }: LegacyReceipt): Receipt => ({ token, phase, outcome });
-  const { pending: old, lastAcknowledgedAt, cancelReason, uncertainCount, lastReceipt, recentUncertain, ...entry } = value;
-  return { ...entry, version: 2, intent, legacyContent: { documentSha256, assetRefsSha256 },
-    ...(old ? { pending: { token: old.token, phase: old.phase, beforeTags: old.beforeTags, issuedAt: old.issuedAt } } : {}),
-    ...(lastReceipt ? { lastReceipt: compact(lastReceipt) } : {}), recentUncertain: recentUncertain.map(compact) };
-}
-function cloudMatches(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation) {
-  return current.protectedSha256 === entry.intent.protectedSha256 && (!entry.legacyContent ||
-    (current.documentSha256 === entry.legacyContent.documentSha256 && current.assetRefsSha256 === entry.legacyContent.assetRefsSha256));
 }
 /** Does not compare local filename/body: a newer filename may supersede a pending request. */
 export function drawingTitlePendingPostcondition(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation): boolean {
   const pending = entry.pending;
-  return !!pending && cloudMatches(entry, current) && current.attachmentTitle === entry.intent.targetTitle &&
+  return !!pending && current.protectedSha256 === entry.intent.protectedSha256 && current.attachmentTitle === entry.intent.targetTitle &&
     (pending.phase === "A" ? current.attachmentTag !== pending.beforeTags.attachment && current.noteTag === pending.beforeTags.note && current.noteTitle === entry.intent.initialNoteTitle && current.modificationDate === entry.intent.initialModificationDate
       : current.noteTag !== pending.beforeTags.note && current.attachmentTag === pending.beforeTags.attachment && current.noteTitle === entry.intent.targetTitle && current.modificationDate === entry.intent.noteModificationDate);
 }
@@ -287,11 +234,11 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     try { return await run(assertHeld); } finally { operationActive = false; }
   }
   const name = (noteId: string) => { assert.ok(isNoteId(noteId)); return path.join(directory, sha(JSON.stringify([vault, options.accountDsidSha256, noteId.toUpperCase()])) + ".json"); };
-  async function readUnlocked(noteId: string, assertHeld = activeWriter) {
+  async function readUnlocked(noteId: string) {
     await safePaths(); const raw = await safeRead(name(noteId)); if (raw === undefined) return undefined;
-    const stored = JSON.parse(raw) as DrawingTitleLeaseEntry | LegacyEntry, entry = decodeEntry(stored);
+    const entry = JSON.parse(raw) as DrawingTitleLeaseEntry;
+    validEntry(entry);
     assert.equal(entry.intent.noteId.toUpperCase(), noteId.toUpperCase(), "Wrong ledger note");
-    if (stored.version === 1 && assertHeld) await persist(noteId, entry, assertHeld);
     return entry;
   }
   async function storage() {
@@ -330,7 +277,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     dispatch?: DrawingTitleLeaseDispatch;
   }): Promise<DrawingTitleLeaseClaim> {
     return operation(async assertHeld => {
-      const entry = await readUnlocked(noteId, assertHeld);
+      const entry = await readUnlocked(noteId);
       assert.equal(entry?.revision, expectedRevision, "Stale lease revision");
       const now = ports.now(); time(now);
       const decision = run(entry && structuredClone(entry), now);
@@ -341,7 +288,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
       return { entry: structuredClone(decision.entry), dispatch: decision.dispatch };
     });
   }
-  function common(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation) { return current.file === entry.intent.file && current.fileSha256 === entry.intent.fileSha256 && current.localBodySha256 === entry.intent.localBodySha256 && cloudMatches(entry, current); }
+  function common(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation) { return current.file === entry.intent.file && current.fileSha256 === entry.intent.fileSha256 && current.localBodySha256 === entry.intent.localBodySha256 && current.protectedSha256 === entry.intent.protectedSha256; }
   function stateMatches(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation) {
     const phase = entry.pending?.phase ?? (entry.stage === "attachment" ? "A" : entry.stage === "note" ? "B" : "refresh"), wanted = entry.intent;
     const expectedNote = phase === "refresh" ? wanted.targetTitle : wanted.initialNoteTitle;
@@ -371,7 +318,6 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
       assert.ok(entry?.pending, "No pending title request");
       if (acknowledged)
         assert.equal(args.token, entry.pending.token, "Wrong request token");
-      if (cloudMatches(entry, args.observation)) delete entry.legacyContent;
       const pending = entry.pending, current = args.observation, targetChanged = pending.phase === "A" ? current.attachmentTag !== pending.beforeTags.attachment : current.noteTag !== pending.beforeTags.note;
       const untouchedSame = pending.phase === "A" ? current.noteTag === pending.beforeTags.note : current.attachmentTag === pending.beforeTags.attachment;
       if (entry.stage !== "cancelled" && common(entry, current) && drawingTitlePendingPostcondition(entry, current))
@@ -383,8 +329,6 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
           delete entry.pending;
         }
       }
-      else
-        return { entry };
       return { entry };
     })).entry;
   }
@@ -402,7 +346,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     /** Hold execution ownership through the final checks and single SDK call.
      * The callback must not invoke ledger mutations; acknowledge afterwards. */
     withDispatch: async <T>(noteId: string, args: { expectedRevision: number; token: string }, send: () => Promise<T>): Promise<T> => operation(async assertHeld => {
-        const entry = await readUnlocked(noteId, assertHeld);
+        const entry = await readUnlocked(noteId);
         assert.ok(entry && entry.revision === args.expectedRevision && entry.pending && entry.pending.token === args.token && entry.stage !== "cancelled", "Stale or cancelled dispatch authority");
         const now = ports.now(); time(now);
         assert.ok(now >= entry.pending.issuedAt && now - entry.pending.issuedAt <= DRAWING_TITLE_REFRESH_INTERVAL_MS, "Expired title dispatch authority");
@@ -411,7 +355,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
         await assertHeld();
         return result;
     }),
-    read: (noteId: string) => readUnlocked(noteId),
+    read: readUnlocked,
     listNoteIds: async () => { await safePaths(); let files; try {
       files = await readdir(directory);
     }
@@ -421,11 +365,12 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
       throw error;
     } const ids: string[] = []; for (const item of files) {
       if (item === "writer.lockdir") continue;
-      assert.ok(item === "writer.lock" || /^[a-f0-9]{64}\.(?:json(?:\.next)?|lock)$/.test(item), "Unknown lease storage file");
+      assert.ok(/^[a-f0-9]{64}\.json(?:\.next)?$/.test(item), "Unknown lease storage file");
       if (!item.endsWith(".json")) { await safeRead(path.join(directory, item)); continue; }
       const raw = await safeRead(path.join(directory, item));
       assert.ok(raw);
-      const entry = decodeEntry(JSON.parse(raw) as DrawingTitleLeaseEntry | LegacyEntry);
+      const entry = JSON.parse(raw) as DrawingTitleLeaseEntry;
+      validEntry(entry);
       assert.equal(path.basename(name(entry.intent.noteId)), item, "Wrong ledger scope");
       ids.push(entry.intent.noteId);
     } return ids.sort(); },
@@ -449,7 +394,6 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
       return change(noteId, args.expectedRevision, (entry, now) => {
         assert.ok(entry, "Missing title lease");
         const current = args.observation;
-        if (cloudMatches(entry, current)) delete entry.legacyContent;
         if (entry.stage === "cancelled")
           return { entry };
         if (!stateMatches(entry, current)) {
