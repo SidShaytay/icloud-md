@@ -22,9 +22,10 @@ const folderId = "CCCC3333-3333-4333-8333-333333333333";
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const encoded = (value: string) => Buffer.from(value).toString("base64");
 
-async function fixture(run: (f: Awaited<ReturnType<typeof setup>>) => Promise<void>) {
-  const f = await setup(); try { await run(f); } finally { await rm(f.root, { recursive: true, force: true }); }
+async function fixture(run: (f: Awaited<ReturnType<typeof setup>>) => Promise<void>, writer = true) {
+  const f = await setup(); try { if (writer) await f.ledger.withWriter(() => run(f)); else await run(f); } finally { await rm(f.root, { recursive: true, force: true }); }
 }
+const unscopedFixture = (run: (f: Awaited<ReturnType<typeof setup>>) => Promise<void>) => fixture(run, false);
 async function setup() {
   const root = await mkdtemp(path.join(os.tmpdir(), "title-runner-")), vault = path.join(root, "vault");
   await mkdir(path.join(vault, "TEST"), { recursive: true });
@@ -65,7 +66,7 @@ async function setup() {
       return result;
     },
   };
-  const ledger = await openDrawingTitleLedger({ vault, journalDirectory: options.journalDirectory, accountDsidSha256: io.accountDsidSha256 }, { assertWriter: async () => {}, now: ports.now });
+  const ledger = await openDrawingTitleLedger({ vault, journalDirectory: options.journalDirectory, accountDsidSha256: io.accountDsidSha256 }, { now: ports.now });
   return { ledger, root, vault, body, file, local, state, cloud, options: { ...options, baseline: structuredClone(cloud.slice(0, 2)), expectedNoteTag: cloud[0]!.recordChangeTag!, io, ledger, kind: "rename" as const }, writes, ports, io, advance: (milliseconds = 300_001) => { now += milliseconds; } };
 }
 
@@ -133,13 +134,13 @@ test("future initial cloud modification date refuses before A", () => fixture(as
   await assert.rejects(prepareDrawingTitleReconciliation(f.options, f.ports), /clock|modification date/i);
   assert.equal(f.writes.length, 0); assert.equal(await f.ledger.read(noteId), undefined);
 }));
-test("full post-B preservation failure cancels before a successful active receipt", () => fixture(async f => {
+test("full post-B preservation failure cancels before declaring the rename active", () => fixture(async f => {
   const capture = f.ports.capture;
   const plan = await prepareDrawingTitleReconciliation(f.options, { ...f.ports, capture: async (...args) => {
     const result = await capture(...args); if (f.writes.length === 2) result.assets[0]!.sha256 = "foreign"; return result;
   } });
   assert.equal((await plan.execute()).status, "cancelled"); const entry = await f.ledger.read(noteId);
-  assert.equal(entry?.stage, "cancelled"); assert.notEqual(entry?.lastReceipt?.phase, "B");
+  assert.equal(entry?.stage, "cancelled"); assert.equal(entry?.pending?.phase, "B");
 }));
 test("late foreign title/tag after execute blocks local bookkeeping", () => fixture(async f => {
   const plan = await prepareDrawingTitleReconciliation(f.options, f.ports);
@@ -157,13 +158,13 @@ for (const committed of [true, false]) test(`a new filename after uncertain B ${
   assert.equal(f.writes.length, committed ? 4 : 1);
   if (!committed) assert.equal(attempts, 2);
 }));
-test("later fresh read of committed refresh is observed state, never a false SDK acknowledgement", () => fixture(async f => {
+test("a fresh observation retires a committed refresh without a second update", () => fixture(async f => {
   await active(f); f.advance();
   const io = { ...f.io, update: async (update: RecordUpdate) => { await f.io.update(update); throw Error("response lost"); } };
   assert.equal((await (await prepareDrawingTitleReconciliation({ ...f.options, kind: "refresh", io }, f.ports)).execute()).status, "uncertain");
   const result = await (await prepareDrawingTitleReconciliation({ ...f.options, kind: "refresh" }, f.ports)).execute();
   assert.equal(result.status, "not-due"); assert.equal(f.writes.length, 3);
-  const entry = await f.ledger.read(noteId); assert.equal(entry?.lastReceipt?.outcome, "postcondition-observed"); assert.ok(entry!.recentUncertain.length >= 1);
+  const entry = await f.ledger.read(noteId); assert.equal(entry?.pending, undefined); assert.equal(entry?.stage, "active");
 }));
 
 test("lowercase CloudKit note names remain exact in metadata writes despite canonical ledger UUIDs", () => fixture(async f => {
@@ -208,7 +209,7 @@ test("a lost durable dispatch owner never reaches the SDK", () => fixture(async 
 }));
 
 
-test("preview and prior-run plans cannot dispatch during a later writer scope", () => fixture(async f => {
+test("preview and prior-run plans cannot dispatch during a later writer scope", () => unscopedFixture(async f => {
   const ledger = await openDrawingTitleLedger({ vault: f.vault, journalDirectory: f.options.journalDirectory, accountDsidSha256: f.io.accountDsidSha256 }, { now: f.ports.now });
   const request = { ...f.options, ledger };
   const preview = await prepareDrawingTitleReconciliation(request, f.ports);
@@ -222,7 +223,7 @@ test("preview and prior-run plans cannot dispatch during a later writer scope", 
   });
 }));
 
-test("an escaped execution paused in lookup cannot send after its scope closes", () => fixture(async f => {
+test("an escaped execution paused in lookup cannot send after its scope closes", () => unscopedFixture(async f => {
   const ledger = await openDrawingTitleLedger({ vault: f.vault, journalDirectory: f.options.journalDirectory, accountDsidSha256: f.io.accountDsidSha256 }, { now: f.ports.now });
   let pause = false, resume!: () => void, reached!: () => void;
   const gate = new Promise<void>(resolve => { resume = resolve; }), entered = new Promise<void>(resolve => { reached = resolve; });
@@ -244,7 +245,7 @@ test("an escaped execution paused in lookup cannot send after its scope closes",
 }));
 
 
-test("preview and prior-run cancellation plans cannot mutate a later writer scope", () => fixture(async f => {
+test("preview and prior-run cancellation plans cannot mutate a later writer scope", () => unscopedFixture(async f => {
   const ledger = await openDrawingTitleLedger({ vault: f.vault, journalDirectory: f.options.journalDirectory, accountDsidSha256: f.io.accountDsidSha256 }, { now: f.ports.now });
   const request = { ...f.options, ledger };
   await ledger.withWriter(async () => { assert.equal((await (await prepareDrawingTitleReconciliation(request, f.ports)).execute()).status, "active-native-unverified"); });

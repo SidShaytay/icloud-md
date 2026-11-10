@@ -13,10 +13,10 @@ function observation(overrides: Partial<DrawingTitleLeaseObservation> = {}): Dra
     file: intent.file, fileSha256: intent.fileSha256, localBodySha256: intent.localBodySha256, protectedSha256: intent.protectedSha256, noteTag: "note-1", attachmentTag: "attachment-1", noteTitle: "Old drawing", attachmentTitle: "Old drawing", modificationDate: 100, ...overrides
   };
 }
-async function fixture(run: (f: Awaited<ReturnType<typeof setup>>) => Promise<void>) {
+async function fixture(run: (f: Awaited<ReturnType<typeof setup>>) => Promise<void>, writer = true) {
   const f = await setup();
   try {
-    await run(f);
+    if (writer) await f.ledger.withWriter(() => run(f)); else await run(f);
   }
   finally {
     await rm(f.root, {
@@ -24,26 +24,22 @@ async function fixture(run: (f: Awaited<ReturnType<typeof setup>>) => Promise<vo
     });
   }
 }
+const unscopedFixture = (run: (f: Awaited<ReturnType<typeof setup>>) => Promise<void>) => fixture(run, false);
 async function setup() {
   const root = await mkdtemp(path.join(os.tmpdir(), "drawing-ledger-")), vault = path.join(root, "vault"), journalDirectory = path.join(root, "private-journal");
   await mkdir(path.join(vault, ".icloud-md"), {
     recursive: true
   });
   let now = 1000;
-  let held = true;
   const options = {
     vault, journalDirectory, accountDsidSha256: "a".repeat(64)
   }, ports = {
-    now: () => now, assertWriter: async () => {
-      assert(held, "No lock");
-    }
+    now: () => now
   };
   const ledger = await openDrawingTitleLedger(options, ports);
   return {
     root, vault, options, ports, ledger, setNow: (value: number) => {
       now = value;
-    }, loseLock: () => {
-      held = false;
     }
   };
 }
@@ -94,24 +90,23 @@ test("A then B become an active bounded title-only due lease", () => fixture(asy
   assert.equal(claim.dispatch?.modificationDate, undefined);
   assert.equal((await f.ledger.read(noteId))?.pending?.token, claim.dispatch?.token);
 }));
-test("pending precedes dispatch and survives reopening; concurrent claims dispatch only once", () => fixture(async (f) => {
-  const entry = await f.ledger.register(intent);
-  const result = await Promise.allSettled([
-    f.ledger.claim(noteId, {
-      expectedRevision: entry.revision, observation: observation()
-    }), f.ledger.claim(noteId, {
-      expectedRevision: entry.revision, observation: observation()
-    })
-  ]);
-  assert.equal(result.filter(r => r.status === "fulfilled" && r.value.dispatch).length, 1);
-  const reopened = await openDrawingTitleLedger(f.options, f.ports);
-  const pending = await reopened.read(noteId);
+test("pending precedes dispatch and survives reopening; concurrent claims dispatch only once", () => unscopedFixture(async f => {
+  await f.ledger.withWriter(async () => {
+    const entry = await f.ledger.register(intent);
+    const results = await Promise.allSettled([
+      f.ledger.claim(noteId, { expectedRevision: entry.revision, observation: observation() }),
+      f.ledger.claim(noteId, { expectedRevision: entry.revision, observation: observation() }),
+    ]);
+    assert.equal(results.filter(result => result.status === "fulfilled" && result.value.dispatch).length, 1);
+  });
+  const reopened = await openDrawingTitleLedger(f.options, f.ports), pending = await reopened.read(noteId);
   assert(pending?.pending);
-  assert.equal((await reopened.claim(noteId, {
-    expectedRevision: pending.revision, observation: observation()
-  })).dispatch, undefined);
+  await reopened.withWriter(async () => {
+    const result = await reopened.claim(noteId, { expectedRevision: pending.revision, observation: observation() });
+    assert.equal(result.dispatch, undefined); assert.deepEqual(result.entry.pending, pending.pending);
+  });
 }));
-test("fresh same-value unchanged tag never claims initial ACK", () => fixture(async (f) => {
+test("an unchanged server version keeps the initial request pending", () => fixture(async (f) => {
   let e = await f.ledger.register({
     ...intent, initialAttachmentTitle: intent.targetTitle
   });
@@ -127,9 +122,9 @@ test("fresh same-value unchanged tag never claims initial ACK", () => fixture(as
   });
   assert(e.pending);
   assert.equal(e.stage, "attachment");
-  assert.equal(e.lastReceipt, undefined);
+  assert.equal(e.pending?.token, claim.dispatch?.token);
 }));
-test("lost reply can advance via observed postcondition without labelling old request acknowledged", () => fixture(async (f) => {
+test("a fresh advanced version retires an uncertain request and advances to the note phase", () => fixture(async (f) => {
   const e = await f.ledger.register(intent), c = await f.ledger.claim(noteId, {
     expectedRevision: e.revision, observation: observation()
   });
@@ -139,8 +134,7 @@ test("lost reply can advance via observed postcondition without labelling old re
     })
   });
   assert.equal(resolved.stage, "note");
-  assert.equal(resolved.lastReceipt?.outcome, "postcondition-observed");
-  assert.equal(resolved.recentUncertain.at(-1)?.token, c.dispatch?.token);
+  assert.equal(resolved.tags.attachment, "attachment-2");
   assert.equal(resolved.pending, undefined);
 }));
 test("lost same-value refresh permits a fresh distinct bounded attempt only after five minutes", () => fixture(async (f) => {
@@ -161,8 +155,8 @@ test("lost same-value refresh permits a fresh distinct bounded attempt only afte
   });
   assert(c.dispatch);
   assert.notEqual(c.dispatch.token, old);
-  assert.equal(c.entry.recentUncertain.at(-1)?.token, old);
-  assert.equal(c.entry.recentUncertain.at(-1)?.outcome, "uncertain");
+  assert.equal(c.entry.pending?.token, c.dispatch.token);
+  assert.equal(c.entry.pending?.issuedAt, 601000);
   await assert.rejects(f.ledger.register({
     ...intent, targetTitle: "Newer drawing", file: "TEST/Newer drawing.md"
   }, {
@@ -206,18 +200,21 @@ test("newer intent cannot discard an unresolved request; foreign advanced CAS ca
   });
   assert.equal(newer.stage, "attachment");
 }));
-test("SDK ACK requires advanced version and valid immutable state", () => fixture(async (f) => {
+test("completing a request requires its token and an advanced valid server version", () => fixture(async (f) => {
   const e = await f.ledger.register(intent), c = await f.ledger.claim(noteId, {
     expectedRevision: e.revision, observation: observation()
   });
   await assert.rejects(f.ledger.acknowledge(noteId, {
     expectedRevision: c.entry.revision, token: "wrong", observation: observation()
   }));
+  await assert.rejects(f.ledger.acknowledge(noteId, {
+    expectedRevision: c.entry.revision, token: undefined as unknown as string, observation: observation()
+  }), /token/);
   const still = await f.ledger.acknowledge(noteId, {
     expectedRevision: c.entry.revision, token: c.dispatch!.token, observation: observation()
   });
   assert(still.pending);
-  assert.equal(still.lastReceipt, undefined);
+  assert.equal(still.pending?.token, c.dispatch?.token);
 }));
 test("clock rollback or a forward jump cannot cause a catch-up burst", () => fixture(async (f) => {
   let e = await active(f);
@@ -241,7 +238,7 @@ test("clock rollback or a forward jump cannot cause a catch-up burst", () => fix
     }
   })).dispatch, undefined);
 }));
-test("durability failure never returns dispatch; restart remains conservative", () => fixture(async (f) => {
+test("durability failure never returns dispatch and leaves the previous stage readable", () => fixture(async (f) => {
   const e = await f.ledger.register(intent), sync = drawingTitleLedgerDurability.sync;
   drawingTitleLedgerDurability.sync = async () => {
     throw Error("fsync failed");
@@ -256,7 +253,7 @@ test("durability failure never returns dispatch; restart remains conservative", 
   }
   const reopened = await openDrawingTitleLedger(f.options, f.ports), entry = await reopened.read(noteId);
   assert.equal(entry?.stage, "attachment");
-  assert.equal(entry?.lastReceipt, undefined);
+  assert.equal(entry?.pending, undefined);
 }));
 test("record storage is bounded across repeated refreshes and contains no raw records or asset URLs", () => fixture(async (f) => {
   let e = await active(f);
@@ -266,7 +263,7 @@ test("record storage is bounded across repeated refreshes and contains no raw re
       expectedRevision: e.revision, observation: current()
     })).entry;
   }
-  assert(e.recentUncertain.length <= 4);
+  assert.equal(e.pending?.phase, "refresh");
   assert.equal((await f.ledger.listNoteIds()).length, 1);
   assert(JSON.stringify(e).length < 16384);
   assert(!JSON.stringify(e).includes("downloadURL"));
@@ -276,10 +273,11 @@ test("lock loss, a symlink root, malformed state and stale revisions fail closed
   await assert.rejects(f.ledger.claim(noteId, {
     expectedRevision: e.revision - 1, observation: observation()
   }));
-  f.loseLock();
-  await assert.rejects(f.ledger.claim(noteId, {
-    expectedRevision: e.revision, observation: observation()
-  }));
+  const owner = path.join(path.dirname(await storedLedgerFile(f)), "writer.lockdir", "owner"), token = await readFile(owner, "utf8");
+  try {
+    await writeFile(owner, "changed-owner");
+    await assert.rejects(f.ledger.claim(noteId, { expectedRevision: e.revision, observation: observation() }), /ownership/);
+  } finally { await writeFile(owner, token); }
   const other = path.join(f.root, "link");
   await symlink(f.options.journalDirectory, other, "junction");
   await assert.rejects(openDrawingTitleLedger({
@@ -303,11 +301,11 @@ test("title is bound to its local filename rather than an independent writer val
   }), /filename/i);
 }));
 
-test("status reads do not create storage or pin; account and root permissions stay bound",()=>fixture(async f=>{
+test("status reads do not create storage or pin; account and root permissions stay bound",()=>unscopedFixture(async f=>{
  assert.equal(await f.ledger.read(noteId),undefined);assert.deepEqual(await f.ledger.listNoteIds(),[]);
  await assert.rejects(lstat(f.options.journalDirectory),{code:"ENOENT"});
  await assert.rejects(lstat(path.join(f.vault,".icloud-md","attachment-title-journal.json")),{code:"ENOENT"});
- await f.ledger.register(intent);
+ await f.ledger.withWriter(async () => { await f.ledger.register(intent); });
  await assert.rejects(openDrawingTitleLedger({...f.options,accountDsidSha256:"b".repeat(64)},f.ports));
  if (process.platform !== "win32") { await chmod(f.options.journalDirectory,0o755);await assert.rejects(f.ledger.read(noteId),/private journal/i); }
 }));
@@ -317,26 +315,42 @@ test("malformed, oversized and symlink lease files fail closed",()=>fixture(asyn
  await writeFile(file," ".repeat(16385));await assert.rejects(f.ledger.read(noteId),/Unsafe|Oversized/);
  if (process.platform !== "win32") { await rm(file);await symlink(path.join(f.root,"outside"),file);await assert.rejects(f.ledger.read(noteId)); }
 }));
-test("lost ACK durability is resolved as observed state, never relabelled an SDK receipt",()=>fixture(async f=>{
- const e=await f.ledger.register(intent),c=await f.ledger.claim(noteId,{expectedRevision:e.revision,observation:observation()}),sync=drawingTitleLedgerDurability.sync;
- drawingTitleLedgerDurability.sync=async()=>{throw Error("ACK fsync failed");};
- try{await assert.rejects(f.ledger.acknowledge(noteId,{expectedRevision:c.entry.revision,token:c.dispatch!.token,observation:observation({attachmentTag:"attachment-2",attachmentTitle:intent.targetTitle})}));}finally{drawingTitleLedgerDurability.sync=sync;}
- const reopened=await openDrawingTitleLedger(f.options,f.ports),pending=await reopened.read(noteId);assert(pending?.pending);
- const resolved=await reopened.resolvePending(noteId,{expectedRevision:pending.revision,observation:observation({attachmentTag:"attachment-2",attachmentTitle:intent.targetTitle})});
- assert.equal(resolved.lastReceipt?.outcome,"postcondition-observed");assert.equal(resolved.recentUncertain.at(-1)?.outcome,"uncertain");
+test("a failed completion save stays pending and a fresh scope resolves exact observed state", () => unscopedFixture(async f => {
+  await f.ledger.withWriter(async () => {
+    const entry = await f.ledger.register(intent), claim = await f.ledger.claim(noteId, { expectedRevision: entry.revision, observation: observation() });
+    const sync = drawingTitleLedgerDurability.sync;
+    drawingTitleLedgerDurability.sync = async () => { throw Error("completion fsync failed"); };
+    try {
+      await assert.rejects(f.ledger.acknowledge(noteId, { expectedRevision: claim.entry.revision, token: claim.dispatch!.token,
+        observation: observation({ attachmentTag: "attachment-2", attachmentTitle: intent.targetTitle }) }));
+    } finally { drawingTitleLedgerDurability.sync = sync; }
+  });
+  const reopened = await openDrawingTitleLedger(f.options, f.ports), pending = await reopened.read(noteId);
+  assert(pending?.pending);
+  await reopened.withWriter(async () => {
+    const resolved = await reopened.resolvePending(noteId, { expectedRevision: pending.revision,
+      observation: observation({ attachmentTag: "attachment-2", attachmentTitle: intent.targetTitle }) });
+    assert.equal(resolved.stage, "note"); assert.equal(resolved.pending, undefined); assert.equal(resolved.tags.attachment, "attachment-2");
+  });
 }));
-test("failure after atomic rename never dispatches and preserves the one-shot pending claim",{skip:process.platform === "win32"},()=>fixture(async f=>{
- const e=await f.ledger.register(intent),sync=drawingTitleLedgerDurability.sync;let calls=0;
- drawingTitleLedgerDurability.sync=async file=>{await sync(file);if(++calls===2)throw Error("directory fsync failed");};
- try{await assert.rejects(f.ledger.claim(noteId,{expectedRevision:e.revision,observation:observation()}));}finally{drawingTitleLedgerDurability.sync=sync;}
- const reopened=await openDrawingTitleLedger(f.options,f.ports),pending=await reopened.read(noteId);assert(pending?.pending);
- assert.equal((await reopened.claim(noteId,{expectedRevision:pending.revision,observation:observation()})).dispatch,undefined);
+test("failure after atomic rename never dispatches and preserves the pending claim across scopes", { skip: process.platform === "win32" }, () => unscopedFixture(async f => {
+  await f.ledger.withWriter(async () => {
+    const entry = await f.ledger.register(intent), sync = drawingTitleLedgerDurability.sync; let calls = 0;
+    drawingTitleLedgerDurability.sync = async file => { await sync(file); if (++calls === 2) throw Error("directory fsync failed"); };
+    try { await assert.rejects(f.ledger.claim(noteId, { expectedRevision: entry.revision, observation: observation() })); }
+    finally { drawingTitleLedgerDurability.sync = sync; }
+  });
+  const reopened = await openDrawingTitleLedger(f.options, f.ports), pending = await reopened.read(noteId); assert(pending?.pending);
+  await reopened.withWriter(async () => {
+    const claim = await reopened.claim(noteId, { expectedRevision: pending.revision, observation: observation() });
+    assert.equal(claim.dispatch, undefined); assert.deepEqual(claim.entry.pending, pending.pending);
+  });
 }));
 
 test("vault/account namespaces sharing an evidence root list only their own notes",()=>fixture(async f=>{
  await f.ledger.register(intent);const otherVault=path.join(f.root,"other-vault");await mkdir(path.join(otherVault,".icloud-md"),{recursive:true});
  const other=await openDrawingTitleLedger({...f.options,vault:otherVault,accountDsidSha256:"b".repeat(64)},f.ports);
- const otherNote="44444444-4444-4444-8444-444444444444";await other.register({...intent,noteId:otherNote});
+ const otherNote="44444444-4444-4444-8444-444444444444";await other.withWriter(async () => { await other.register({...intent,noteId:otherNote}); });
  assert.deepEqual(await f.ledger.listNoteIds(),[noteId.toUpperCase()]);assert.deepEqual(await other.listNoteIds(),[otherNote.toUpperCase()]);assert.equal(await f.ledger.read(otherNote),undefined);
 }));
 test("a paused superseded claim cannot dispatch and overlapping operations refuse",()=>fixture(async f=>{
@@ -348,7 +362,7 @@ test("a paused superseded claim cannot dispatch and overlapping operations refus
  assert.equal(await running,"sent-once");assert.equal(sends,1);
 }));
 
-test("title writer excludes sibling feature runs through state bookkeeping and permits nested note operations",()=>fixture(async f=>{
+test("title writer excludes sibling feature runs through state bookkeeping and permits nested note operations",()=>unscopedFixture(async f=>{
  const worker=await import(new URL("./drawingTitleLedger.ts?vault-worker",import.meta.url).href) as typeof import("./drawingTitleLedger.js"),other=await worker.openDrawingTitleLedger(f.options,f.ports);
  let release!:()=>void,started!:()=>void;const gate=new Promise<void>(r=>{release=r;}),entered=new Promise<void>(r=>{started=r;});let cloneStateWrites=0;
  const running=f.ledger.withWriter(async()=>{const e=await f.ledger.register(intent),claim=await f.ledger.claim(noteId,{expectedRevision:e.revision,observation:observation()});await f.ledger.withDispatch(noteId,{expectedRevision:claim.entry.revision,token:claim.dispatch!.token},async()=>"SDK");started();await gate;cloneStateWrites++;});
@@ -390,7 +404,7 @@ test("alternate UUID spelling cannot restart the same acknowledged rename phase"
 }));
 
 
-test("canonical parent aliases share the same pinned store while a symlink store refuses", () => fixture(async f => {
+test("canonical parent aliases share the same pinned store while a symlink store refuses", () => unscopedFixture(async f => {
   const actual = path.join(f.root, "actual"), alias = path.join(f.root, "alias");
   await mkdir(actual); await symlink(actual, alias, "junction");
   const journalDirectory = path.join(alias, "new", "private");
@@ -414,7 +428,7 @@ for (const access of ["read", "list", "dispatch"] as const) test(`unsupported v1
   await writeFile(file, JSON.stringify(old)); const before = await readFile(file, "utf8"), files = await readdir(directory);
   let dispatched = 0;
   const operation = access === "read" ? () => f.ledger.read(noteId) : access === "list" ? () => f.ledger.listNoteIds() :
-    () => f.ledger.withWriter(() => f.ledger.withDispatch(noteId, { expectedRevision: old.revision, token: request.token }, async () => { dispatched++; }));
+    () => f.ledger.withDispatch(noteId, { expectedRevision: old.revision, token: request.token }, async () => { dispatched++; });
   await assert.rejects(operation(), /Unsupported.*version/i);
   assert.equal(dispatched, 0); assert.equal(await readFile(file, "utf8"), before);
   assert.deepEqual(await readdir(directory), files);
@@ -430,8 +444,8 @@ test("an unknown schema version cannot inherit current pending dispatch authorit
   const claim = await f.ledger.claim(noteId, { expectedRevision: registered.revision, observation: observation() });
   const file = await storedLedgerFile(f), unsupported = JSON.stringify({ ...claim.entry, version: 99 });
   await writeFile(file, unsupported); let dispatched = 0;
-  await assert.rejects(f.ledger.withWriter(() => f.ledger.withDispatch(noteId,
-    { expectedRevision: claim.entry.revision, token: claim.dispatch!.token }, async () => { dispatched++; })), /Unsupported.*version/i);
+  await assert.rejects(f.ledger.withDispatch(noteId,
+    { expectedRevision: claim.entry.revision, token: claim.dispatch!.token }, async () => { dispatched++; }), /Unsupported.*version/i);
   assert.equal(dispatched, 0); assert.equal(await readFile(file, "utf8"), unsupported);
 }));
 test("current-format records reject discarded compatibility fields without rewriting them", () => fixture(async f => {
@@ -446,4 +460,41 @@ test("unknown storage files are refused instead of interpreted or silently remov
   const unknown = path.join(directory, "unexpected.bin"); await writeFile(unknown, "preserve", { mode: 0o600 });
   await assert.rejects(f.ledger.listNoteIds(), /Unknown lease storage file/);
   assert.equal(await readFile(unknown, "utf8"), "preserve");
+}));
+
+test("completed operations retain eligibility without writing receipt history", () => unscopedFixture(async f => {
+  await f.ledger.withWriter(async () => {
+    const entry = await active(f);
+    assert.equal(entry.stage, "active"); assert.equal(entry.pending, undefined); assert.equal(entry.nextDue, 301000);
+    const persisted = JSON.parse(await readFile(await storedLedgerFile(f), "utf8"));
+    assert.equal("lastReceipt" in persisted, false); assert.equal("recentUncertain" in persisted, false);
+  });
+}));
+test("a fresh writer preserves an uncertain pending request and never resends unchanged CAS", () => unscopedFixture(async f => {
+  let revision!: number, token!: string;
+  await f.ledger.withWriter(async () => {
+    const entry = await f.ledger.register(intent), claimed = await f.ledger.claim(noteId, { expectedRevision: entry.revision, observation: observation() });
+    revision = claimed.entry.revision; token = claimed.dispatch!.token;
+  });
+  const fresh = await openDrawingTitleLedger(f.options, { now: f.ports.now });
+  await fresh.withWriter(async () => {
+    const resolved = await fresh.resolvePending(noteId, { expectedRevision: revision, observation: observation() });
+    assert.equal(resolved.revision, revision); assert.equal(resolved.pending?.token, token); assert.equal(resolved.pending?.issuedAt, 1000);
+    assert.deepEqual(resolved.pending?.beforeTags, { note: "note-1", attachment: "attachment-1" });
+    assert.equal((await fresh.claim(noteId, { expectedRevision: revision, observation: observation() })).dispatch, undefined);
+    const advanced = await fresh.resolvePending(noteId, { expectedRevision: revision, observation: observation({ attachmentTag: "attachment-2", attachmentTitle: intent.targetTitle }) });
+    assert.equal(advanced.stage, "note"); assert.equal(advanced.pending, undefined);
+    const persisted = JSON.parse(await readFile(await storedLedgerFile(f), "utf8"));
+    assert.equal("lastReceipt" in persisted, false); assert.equal("recentUncertain" in persisted, false);
+  });
+}));
+
+
+for (const key of ["lastReceipt", "recentUncertain"] as const) test(`discarded ${key} is rejected without rewriting current pending state`, () => fixture(async f => {
+  const entry = await f.ledger.register(intent), claim = await f.ledger.claim(noteId, { expectedRevision: entry.revision, observation: observation() });
+  const history = { token: claim.dispatch!.token, phase: "A", outcome: "uncertain" };
+  const unsupported = JSON.stringify({ ...claim.entry, [key]: key === "lastReceipt" ? history : [history] }), file = await storedLedgerFile(f);
+  await writeFile(file, unsupported);
+  await assert.rejects(f.ledger.read(noteId), /Unknown ledger fields/);
+  assert.equal(await readFile(file, "utf8"), unsupported);
 }));
