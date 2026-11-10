@@ -58,7 +58,7 @@ export async function prepareDrawingTitleReconciliation(input: DrawingReconcilia
   let existing = await ledger.read(request.noteId);
   const cancelPlan = () => ({ localOnly: true, verifyLocalIntent: async () => {}, execute: async (): Promise<DrawingReconciliationResult> => {
     await assertWriter();
-    if (existing) await ledger.cancel(request.noteId, { expectedRevision: existing.revision, reason: "Local or cloud drawing intent changed" });
+    if (existing) await ledger.cancel(request.noteId, { expectedRevision: existing.revision });
     return { status: "cancelled" };
   } });
   const lookupIds = async (ids: string[]) => { try { return await io.lookup(ids); } catch { throw new DrawingTitleReconciliationUnavailable("Drawing title validation is temporarily unavailable"); } };
@@ -109,7 +109,7 @@ export async function prepareDrawingTitleReconciliation(input: DrawingReconcilia
       executingEntry = existing;
       if (!existing || !same || existing.stage === "cancelled") {
         if (request.kind !== "rename") return { status: "cancelled" };
-        if (existing?.pending) { await ledger.cancel(request.noteId, { expectedRevision: existing.revision, reason: "New local intent while a prior request remains uncertain" }); return { status: "uncertain" }; }
+        if (existing?.pending) { await ledger.cancel(request.noteId, { expectedRevision: existing.revision }); return { status: "uncertain" }; }
         existing = await ledger.register({ ...intent, initialNoteTag: initial.noteTag, initialAttachmentTag: initial.attachmentTag }, existing ? { expectedRevision: existing.revision } : {});
       }
       let entry = existing; executingEntry = entry;
@@ -152,7 +152,7 @@ export async function prepareDrawingTitleReconciliation(input: DrawingReconcilia
               equal({ document: captured.documentSha256, assets: captured.assets }, { document: before.documentSha256, assets: before.assets }, "Drawing bytes changed during metadata rename");
               equal(observe(local, captured.records, request, folders), after.observation, "Drawing changed after metadata write");
             } catch {
-              await ledger.cancel(request.noteId, { expectedRevision: entry.revision, reason: "Metadata rename preservation check failed" });
+              await ledger.cancel(request.noteId, { expectedRevision: entry.revision });
               return { status: "cancelled" };
             }
           }
@@ -170,7 +170,7 @@ export async function prepareDrawingTitleReconciliation(input: DrawingReconcilia
       return { status: "uncertain" };
     } catch (error) {
       if (error instanceof DrawingTitleReconciliationConflict && executingEntry) {
-        try { await ledger.cancel(request.noteId, { expectedRevision: executingEntry.revision, reason: "Local or cloud drawing intent changed" }); } catch { /* Concurrent ownership stays unresolved. */ }
+        try { await ledger.cancel(request.noteId, { expectedRevision: executingEntry.revision }); } catch { /* Concurrent ownership stays unresolved. */ }
         return { status: "cancelled" };
       }
       // Pending tokens remain durable; later fresh observations may establish a

@@ -12,7 +12,7 @@ import { titleFromNoteFileName } from "./noteTitleParagraph.js";
 import { withDrawingTitleWriter } from "./drawingTitleLock.js";
 import { createPrivateTitleState, privateTitleStateDirectory, syncTitleDirectory, titleStatePermissions } from "./drawingTitleStorage.js";
 export const DRAWING_TITLE_REFRESH_INTERVAL_MS = 300000;
-const MAX_BYTES = 16384, MAX_UNCERTAIN = 4;
+const MAX_BYTES = 16384;
 export interface DrawingTitleLeaseIntent {
   noteId: string;
   attachmentId: string;
@@ -50,9 +50,6 @@ interface Pending {
   beforeTags: Tags;
   issuedAt: number;
 }
-interface Receipt extends Pick<Pending, "token" | "phase"> {
-  outcome: "sdk-acknowledged" | "postcondition-observed" | "uncertain";
-}
 export interface DrawingTitleLeaseEntry {
   version: 2;
   revision: number;
@@ -61,8 +58,6 @@ export interface DrawingTitleLeaseEntry {
   tags: Tags;
   pending?: Pending;
   nextDue?: number;
-  lastReceipt?: Receipt;
-  recentUncertain: Receipt[];
 }
 export interface DrawingTitleLeaseClaim {
   entry: DrawingTitleLeaseEntry;
@@ -84,7 +79,6 @@ interface Options {
 }
 interface Ports {
   now(): number;
-  assertWriter?: () => Promise<void>;
 }
 export const drawingTitleLedgerDurability = { sync: (file: Awaited<ReturnType<typeof open>>) => file.sync() };
 const defaults: Ports = { now: Date.now };
@@ -139,22 +133,14 @@ function validEntry(value: DrawingTitleLeaseEntry) {
   tag(value.tags.note);
   tag(value.tags.attachment);
   assert.ok(Object.keys(value.tags).length === 2 && Object.keys(value.tags).every(key => ["note", "attachment"].includes(key)), "Unknown lease version fields");
-  assert.ok(Array.isArray(value.recentUncertain) && value.recentUncertain.length <= MAX_UNCERTAIN, "Invalid bounded request history");
-  for (const receipt of [...value.recentUncertain, ...(value.lastReceipt ? [value.lastReceipt] : [])]) {
-    tokenPhase(receipt);
-    assert.ok(Object.keys(receipt).every(key => ["token", "phase", "outcome"].includes(key)), "Unknown receipt fields");
-    assert.ok(["sdk-acknowledged", "postcondition-observed", "uncertain"].includes(receipt.outcome), "Invalid receipt outcome");
-  }
-  assert.ok(value.recentUncertain.every(receipt => receipt.outcome === "uncertain"), "Uncertain attempts cannot become ACKs");
   if (value.pending !== undefined) {
     pending(value.pending);
     assert.ok(value.stage === "cancelled" || (value.stage === "attachment" ? value.pending.phase === "A" : value.stage === "note" ? value.pending.phase === "B" : value.pending.phase === "refresh"), "Pending phase does not match lease stage");
   }
   if (value.nextDue !== undefined)
     time(value.nextDue);
-  assert.ok(value.lastReceipt === undefined || value.lastReceipt.outcome !== "uncertain", "Uncertain receipt cannot be the completed request");
   assert.ok(value.stage !== "active" || value.nextDue !== undefined, "Missing due deadline");
-  const allowed = ["version", "revision", "intent", "stage", "tags", "pending", "nextDue", "lastReceipt", "recentUncertain"];
+  const allowed = ["version", "revision", "intent", "stage", "tags", "pending", "nextDue"];
   assert.ok(Object.keys(value).every(key => allowed.includes(key)), "Unknown ledger fields");
   assert.ok(Buffer.byteLength(json(value)) <= MAX_BYTES, "Oversized lease");
 }
@@ -225,7 +211,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
   }
   await safePaths();
   let activeWriter: (() => Promise<void>) | undefined;
-  const writerGuard = () => activeWriter ?? ports.assertWriter ?? (async () => { throw Error("A current drawing title writer scope is required"); });
+  const writerGuard = () => activeWriter ?? (async () => { throw Error("A current drawing title writer scope is required"); });
   let operationActive = false;
   async function operation<T>(run: (assertHeld: () => Promise<void>) => Promise<T>): Promise<T> {
     const assertHeld = writerGuard(); await assertHeld();
@@ -297,12 +283,8 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     return common(entry, current) && current.noteTitle === expectedNote && current.attachmentTitle === expectedDrawing && current.modificationDate === expectedDate;
   }
   function cancelEntry(entry: DrawingTitleLeaseEntry) { entry.stage = "cancelled"; delete entry.nextDue; }
-  function archive(entry: DrawingTitleLeaseEntry, pending: Pending) { entry.recentUncertain = [...entry.recentUncertain, { token: pending.token, phase: pending.phase, outcome: "uncertain" as const }].slice(-MAX_UNCERTAIN); }
-  function finish(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation, now: number, outcome: Receipt["outcome"]) {
+  function finish(entry: DrawingTitleLeaseEntry, current: DrawingTitleLeaseObservation, now: number) {
     const pending = entry.pending!;
-    if (outcome === "postcondition-observed")
-      archive(entry, pending);
-    entry.lastReceipt = { token: pending.token, phase: pending.phase, outcome };
     entry.tags = { note: current.noteTag, attachment: current.attachmentTag };
     delete entry.pending;
     if (pending.phase === "A")
@@ -312,20 +294,19 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
       entry.nextDue = Math.max(now, pending.issuedAt) + DRAWING_TITLE_REFRESH_INTERVAL_MS;
     }
   }
-  async function resolve(noteId: string, args: RevisionObservation & { token?: string }, acknowledged: boolean) {
+  async function resolve(noteId: string, args: RevisionObservation & { token?: string }) {
     observation(args.observation);
     return (await change(noteId, args.expectedRevision, (entry, now) => {
       assert.ok(entry?.pending, "No pending title request");
-      if (acknowledged)
+      if (args.token !== undefined)
         assert.equal(args.token, entry.pending.token, "Wrong request token");
       const pending = entry.pending, current = args.observation, targetChanged = pending.phase === "A" ? current.attachmentTag !== pending.beforeTags.attachment : current.noteTag !== pending.beforeTags.note;
       const untouchedSame = pending.phase === "A" ? current.noteTag === pending.beforeTags.note : current.attachmentTag === pending.beforeTags.attachment;
       if (entry.stage !== "cancelled" && common(entry, current) && drawingTitlePendingPostcondition(entry, current))
-        finish(entry, current, now, acknowledged ? "sdk-acknowledged" : "postcondition-observed");
+        finish(entry, current, now);
       else if (!stateMatches(entry, current) || !untouchedSame || entry.stage === "cancelled") {
         cancelEntry(entry);
         if (targetChanged) {
-          archive(entry, pending);
           delete entry.pending;
         }
       }
@@ -386,7 +367,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
         if (entry && equal(binding(entry.intent), binding(intent)))
           return { entry };
         assert.ok(!entry?.pending, "Pending title request cannot be replaced");
-        return { entry: { version: 2 as const, revision: 1, intent, stage: "attachment" as const, tags: { note: initialNoteTag, attachment: initialAttachmentTag }, recentUncertain: entry?.recentUncertain ?? [] } };
+        return { entry: { version: 2 as const, revision: 1, intent, stage: "attachment" as const, tags: { note: initialNoteTag, attachment: initialAttachmentTag } } };
       })).entry;
     },
     claim: async (noteId: string, args: RevisionObservation) => {
@@ -403,7 +384,7 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
         if (entry.pending) {
           if (entry.pending.phase !== "refresh" || now < entry.pending.issuedAt + DRAWING_TITLE_REFRESH_INTERVAL_MS)
             return { entry };
-          archive(entry, entry.pending); // A new rate-limited request, never replay or ACK.
+          // Eligibility permits a new rate-limited request, never a replay.
         }
         else if (entry.stage === "active" && now < entry.nextDue!)
           return { entry };
@@ -419,11 +400,13 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
         return { entry, dispatch };
       });
     },
-    acknowledge: (noteId: string, args: RevisionObservation & { token: string }) => resolve(noteId, args, true),
-    resolvePending: (noteId: string, args: RevisionObservation) => resolve(noteId, args, false),
+    acknowledge: async (noteId: string, args: RevisionObservation & { token: string }) => {
+      assert.ok(typeof args.token === "string", "Missing request token");
+      return resolve(noteId, args);
+    },
+    resolvePending: (noteId: string, args: RevisionObservation) => resolve(noteId, args),
     cancel: async (noteId: string, args: {
       expectedRevision: number;
-      reason: string;
     }) => (await change(noteId, args.expectedRevision, entry => { assert.ok(entry); cancelEntry(entry); return { entry }; })).entry,
   };
 }

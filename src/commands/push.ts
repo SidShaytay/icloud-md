@@ -830,7 +830,7 @@ export async function buildPushPlan(
     entries.push({ kind: "update", file: lease.intent.file, localOnly: true, resolution: "ready",
       remark: "stop ongoing drawing-title reconciliation after intent or scope changed",
       execute: async () => {
-        try { await titleLedger!.cancel(lease.intent.noteId, { expectedRevision: lease.revision, reason: "Reconciliation scope or local intent changed" });
+        try { await titleLedger!.cancel(lease.intent.noteId, { expectedRevision: lease.revision });
           return { succeeded: true, message: `${lease.intent.file}: ongoing drawing-title reconciliation stopped without a cloud write` };
         } catch { return { succeeded: false, message: `${lease.intent.file}: reconciliation state changed; check again before continuing` }; }
       },
