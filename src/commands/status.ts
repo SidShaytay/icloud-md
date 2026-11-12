@@ -1,9 +1,11 @@
 import { countUnchangedNotes, serializePlanEntry, type SerializedPlanEntry } from "../notes/pushPlan.js";
 import type { SyncNotice } from "../progress.js";
+import type { DrawingTitleReconciliationConfig } from "../notes/drawingTitleReconciliation.js";
 import { buildPushPlan } from "./push.js";
 
 export interface StatusOptions {
   onLoginStatus?: (message: string) => void;
+  drawingTitleReconciliation?: DrawingTitleReconciliationConfig;
 }
 
 export interface StatusResult {
@@ -30,7 +32,9 @@ export interface StatusResult {
  * also staying offline.
  */
 export async function runStatus(targetDir: string, options: StatusOptions = {}): Promise<StatusResult> {
-  const { state, entries, notices } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus });
+  const { state, entries, notices } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus,
+    ...(options.drawingTitleReconciliation ? { drawingTitleReconciliation: options.drawingTitleReconciliation } : {}),
+  });
   return {
     entries: entries.map(serializePlanEntry),
     unchanged: countUnchangedNotes(entries, Object.keys(state.notes).length),
