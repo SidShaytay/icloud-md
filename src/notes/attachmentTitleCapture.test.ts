@@ -1,14 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { create } from "@bufbuild/protobuf";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { test } from "node:test";
-import type { CloudKitRecord } from "../src/cloudkit/databaseClient.js";
-import { AttachmentInfoSchema } from "../src/notes/gen/topotext_pb.js";
-import { buildInitialNoteDocument, encodeNoteDocument } from "../src/notes/noteDocument.js";
-import { compressNoteDocument } from "../src/notes/noteText.js";
+import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
+import { AttachmentInfoSchema } from "./gen/topotext_pb.js";
+import { buildInitialNoteDocument, encodeNoteDocument } from "./noteDocument.js";
+import { compressNoteDocument } from "./noteText.js";
 import { captureDrawingSnapshot } from "./attachmentTitleCapture.js";
 
 const scope = { noteId: "11111111-1111-4111-8111-111111111111", attachmentId: "22222222-2222-4222-8222-222222222222", folderId: "33333333-3333-4333-8333-333333333333" };
@@ -41,11 +38,6 @@ function fixture() {
   };
   return { records, document, bytes, lookup, fetcher, counts: () => ({ lookups, requests }) };
 }
-async function directory(run: (root: string) => Promise<void>) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "drawing-capture-"));
-  try { await run(root); } finally { await rm(root, { recursive: true, force: true }); }
-}
-
 test("captures exact document and all five asset bytes in deterministic order, bracketed by lookups", async () => {
   const f = fixture();
   const captured = await captureDrawingSnapshot(scope, f.lookup, { fetch: f.fetcher });
@@ -56,21 +48,8 @@ test("captures exact document and all five asset bytes in deterministic order, b
   assert.deepEqual(f.counts(), { lookups: 2, requests: 5 });
 });
 
-test("persists private immutable raw evidence and writes complete manifest only after success", () => directory(async root => {
-  const f = fixture(), destination = path.join(root, "capture");
-  const captured = await captureDrawingSnapshot(scope, f.lookup, { fetch: f.fetcher, directory: destination });
-  assert.equal((await stat(destination)).mode & 0o777, 0o700);
-  assert.deepEqual(JSON.parse(await readFile(path.join(destination, "complete.json"), "utf8")), captured);
-  assert.deepEqual(JSON.parse(await readFile(path.join(destination, "records.json"), "utf8")), f.records);
-  for (const [index, bytes] of f.bytes.entries()) assert.deepEqual(await readFile(path.join(destination, `asset-${index}.bin`)), bytes);
-  for (const file of await readdir(destination)) assert.equal((await stat(path.join(destination, file))).mode & 0o777, 0o600);
-  const requests = f.counts().requests;
-  await assert.rejects(captureDrawingSnapshot(scope, f.lookup, { fetch: f.fetcher, directory: destination }), /exist|overwrite/i);
-  assert.equal(f.counts().requests, requests);
-}));
-
 for (const drift of ["version", "reference"]) {
-  test(`rejects ${drift} drift during asset reads even when other fields remain valid`, () => directory(async root => {
+  test(`rejects ${drift} drift during asset reads even when other fields remain valid`, async () => {
     const f = fixture();
     const fetcher: typeof fetch = async (...args) => {
       const response = await f.fetcher(...args);
@@ -80,10 +59,8 @@ for (const drift of ["version", "reference"]) {
       }
       return response;
     };
-    const destination = path.join(root, "incomplete");
-    await assert.rejects(captureDrawingSnapshot(scope, f.lookup, { fetch: fetcher, directory: destination }), /changed|stable/i);
-    assert.ok(!(await readdir(destination)).includes("complete.json"));
-  }));
+    await assert.rejects(captureDrawingSnapshot(scope, f.lookup, { fetch: fetcher }), /changed|stable/i);
+  });
 }
 
 test("allows signed URL rotation without changing content or reference fingerprints", async () => {
@@ -141,35 +118,17 @@ for (const invalid of ["origin", "type", "database-type", "unknown-field", "over
 }
 
 for (const failure of ["content-length", "truncated", "growth", "redirect", "timeout"]) {
-  test(`rejects ${failure} responses without leaking signed URLs or marking evidence complete`, () => directory(async root => {
-    const f = fixture(), destination = path.join(root, "failed");
+  test(`rejects ${failure} responses without leaking signed URLs`, async () => {
+    const f = fixture();
     const fetcher: typeof fetch = async () => {
       if (failure === "timeout") throw Error("https://cvws.icloud-content.com/?signature=secret");
       const response = new Response(failure === "truncated" ? "a" : failure === "growth" ? "far-too-many-bytes" : f.bytes[0], failure === "content-length" ? { headers: { "content-length": "999" } } : undefined);
       if (failure === "redirect") Object.defineProperty(response, "redirected", { value: true });
       return response;
     };
-    await assert.rejects(captureDrawingSnapshot(scope, f.lookup, { fetch: fetcher, directory: destination }), (error: unknown) => error instanceof Error && !error.message.includes("signature") && /download|size|asset/i.test(error.message));
-    assert.ok(!(await readdir(destination)).includes("complete.json"));
-  }));
+    await assert.rejects(captureDrawingSnapshot(scope, f.lookup, { fetch: fetcher }), (error: unknown) => error instanceof Error && !error.message.includes("signature") && /download|size|asset/i.test(error.message));
+  });
 }
-
-test("refuses symlink or permissive evidence parents before fetching", () => directory(async root => {
-  const f = fixture();
-  await symlink(root, path.join(root, "link"));
-  await assert.rejects(captureDrawingSnapshot(scope, f.lookup, { fetch: f.fetcher, directory: path.join(root, "link", "capture") }));
-  await chmod(root, 0o755);
-  await assert.rejects(captureDrawingSnapshot(scope, f.lookup, { fetch: f.fetcher, directory: path.join(root, "capture") }));
-  assert.equal(f.counts().requests, 0);
-}));
-
-test("rejects a symlink hidden above an otherwise private immediate evidence parent", () => directory(async root => {
-  const f = fixture();
-  await mkdir(path.join(root, "actual", "private"), { recursive: true, mode: 0o700 });
-  await symlink(path.join(root, "actual"), path.join(root, "alias"));
-  await assert.rejects(captureDrawingSnapshot(scope, f.lookup, { fetch: f.fetcher, directory: path.join(root, "alias", "private", "capture") }), /symlink|unsafe/i);
-  assert.equal(f.counts().requests, 0);
-}));
 
 test("a chunked body that grows beyond its declared asset size is cancelled", async () => {
   const f = fixture();

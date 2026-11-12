@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { noteZone, type RecordUpdate } from "../src/cloudkit/databaseClient.js";
-import type { HarnessAccount } from "./harnessAccount.js";
-import { createAttachmentTitleProbeIO } from "./attachmentTitleProbe.js";
+import { noteZone, type RecordUpdate } from "../cloudkit/databaseClient.js";
+import type { DrawingTitleAccount } from "./drawingTitleCloud.js";
+import { createDrawingTitleIO } from "./drawingTitleCloud.js";
 
-const account: HarnessAccount = {
+const account: DrawingTitleAccount = {
   dsid: "offline-fixture", ckdatabasewsUrl: "https://cloudkit.invalid",
   session: { cookie: "fixture=offline", clientId: "fixture", clientBuildNumber: "1", clientMasteringNumber: "1", capturedAt: "fixture" },
-  zone: noteZone(undefined), replicaId: new Uint8Array(16),
+  zone: noteZone(undefined),
 };
 const encoded = Buffer.from("New drawing").toString("base64");
 const phases: RecordUpdate[] = [
@@ -15,7 +15,7 @@ const phases: RecordUpdate[] = [
   { recordName: "fixture-note", recordType: "Note", recordChangeTag: "note-tag", parentRecordName: "fixture-folder", fields: { TitleEncrypted: { value: encoded }, ModificationDate: { value: 200 } } },
 ];
 
-test("probe adapter sends exact private-zone updates through the SDK with one-shot transport", async () => {
+test("drawing-title adapter sends exact private-zone updates through the SDK with one-shot transport", async () => {
   const originalFetch = globalThis.fetch;
   const requests: { url: URL; init: RequestInit }[] = [];
   globalThis.fetch = async (input, init) => {
@@ -28,7 +28,7 @@ test("probe adapter sends exact private-zone updates through the SDK with one-sh
     return Response.json({ records: [{ ...record, recordChangeTag: "next" }] });
   };
   try {
-    const io = createAttachmentTitleProbeIO(account);
+    const io = createDrawingTitleIO(account);
     assert.equal(requests.length, 0, "constructing the adapter must not connect or write");
     for (const phase of phases) await io.update(phase);
     assert.equal(requests.length, 2);
@@ -50,10 +50,10 @@ test("probe adapter sends exact private-zone updates through the SDK with one-sh
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("probe adapter rejects failed or mismatched responses without retrying", async () => {
+test("drawing-title adapter rejects failed or mismatched responses without retrying", async () => {
   const originalFetch = globalThis.fetch;
   try {
-    const io = createAttachmentTitleProbeIO(account);
+    const io = createDrawingTitleIO(account);
     for (const failure of ["conflict", "lost-response", "wrong-record", "wrong-type"]) {
       let dispatches = 0;
       globalThis.fetch = async () => {

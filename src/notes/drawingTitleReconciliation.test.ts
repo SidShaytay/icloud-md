@@ -13,8 +13,7 @@ import { buildInitialNoteDocument, encodeNoteDocument } from "./noteDocument.js"
 import { composeNoteFile } from "./noteIdFrontmatter.js";
 import { compressNoteDocument } from "./noteText.js";
 import { formatEmbedMarker } from "./unknownContent.js";
-import { probeJournalDurability } from "./attachmentTitleProbeJournal.js";
-import type { TitleProbeIO } from "./attachmentTitleProbe.js";
+import type { DrawingTitleIO } from "./drawingTitleCloud.js";
 import { openDrawingTitleLedger } from "./drawingTitleLedger.js";
 import { prepareDrawingTitleReconciliation, drawingTitleInScope, type DrawingReconciliationPorts } from "./drawingTitleReconciliation.js";
 const noteId = "AAAA1111-1111-4111-8111-111111111111";
@@ -52,23 +51,22 @@ async function setup() {
   ];
   let now = 1_000;
   const options = { vault, file, noteId, attachmentId, folderId, journalDirectory: path.join(root, "journal") };
-  const writes: RecordUpdate[] = [], batches: RecordUpdate[][] = [], captures: string[] = [];
-  const io: TitleProbeIO = { accountDsidSha256: sha(account.dsid), lookup: async (ids: string[]) => structuredClone(cloud.filter(r => ids.includes(r.recordName))), update: async (update: RecordUpdate) => {
+  const writes: RecordUpdate[] = [];
+  const io: DrawingTitleIO = { accountDsidSha256: sha(account.dsid), lookup: async (ids: string[]) => structuredClone(cloud.filter(r => ids.includes(r.recordName))), update: async (update: RecordUpdate) => {
     writes.push(structuredClone(update)); const record = cloud.find(r => r.recordName === update.recordName)!;
     assert.equal(record.recordChangeTag, update.recordChangeTag);
     for (const [key, field] of Object.entries(update.fields)) record.fields[key] = { ...field, type: key === "ModificationDate" ? "TIMESTAMP" : "ENCRYPTED_BYTES" };
     record.recordChangeTag += "+";
-  }, updateBatch: async updates => { batches.push(structuredClone(updates)); for (const update of updates) await io.update(update); } };
+  } };
   const ports: DrawingReconciliationPorts = { lockAuthority: async () => ({ path: "/fixture/sync.lock", dev: "1", ino: "2" }), now: () => now,
-    capture: async (scope, lookup, opts) => {
+    capture: async (scope, lookup) => {
       const records = await lookup([scope.noteId, scope.attachmentId]);
       const result = { records, documentSha256: sha(Buffer.from(records[0]!.fields.TextDataEncrypted!.value as string, "base64")), assets: [{ field: "Attachment.PaperDatabase", size: 3, sha256: "a".repeat(64), contentIdentityHash: "b".repeat(64), referenceIdentityHash: "c".repeat(64) }] };
-      if (opts?.directory) { captures.push(opts.directory); await mkdir(opts.directory, { recursive: true, mode: 0o700 }); await writeFile(path.join(opts.directory, "complete.json"), JSON.stringify(result), { mode: 0o600 }); }
       return result;
     },
   };
   const ledger = await openDrawingTitleLedger({ vault, journalDirectory: options.journalDirectory, accountDsidSha256: io.accountDsidSha256 }, { lockAuthority: ports.lockAuthority, now: ports.now });
-  return { ledger, root, vault, body, file, local, state, cloud, options: { ...options, baseline: structuredClone(cloud.slice(0, 2)), expectedNoteTag: cloud[0]!.recordChangeTag!, io, ledger, kind: "rename" as const }, writes, batches, captures, ports, io, advance: (milliseconds = 300_001) => { now += milliseconds; } };
+  return { ledger, root, vault, body, file, local, state, cloud, options: { ...options, baseline: structuredClone(cloud.slice(0, 2)), expectedNoteTag: cloud[0]!.recordChangeTag!, io, ledger, kind: "rename" as const }, writes, ports, io, advance: (milliseconds = 300_001) => { now += milliseconds; } };
 }
 
 

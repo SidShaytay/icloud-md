@@ -11,7 +11,7 @@ import { isNoteId } from "./noteIdFrontmatter.js";
 import { titleIsRepresentable } from "./titleFilename.js";
 import { titleFromNoteFileName } from "./noteTitleParagraph.js";
 import { getAttachmentTitleLockAuthority } from "./attachmentTitleLock.js";
-import { createProbeJournal, privateProbeDirectory } from "./attachmentTitleProbeJournal.js";
+import { createPrivateTitleState, privateTitleStateDirectory } from "./drawingTitleStorage.js";
 export const DRAWING_TITLE_REFRESH_INTERVAL_MS = 300000;
 const MAX_BYTES = 16384, MAX_UNCERTAIN = 4;
 export interface DrawingTitleLeaseIntent {
@@ -270,11 +270,11 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
     return undefined; const entry = JSON.parse(raw) as DrawingTitleLeaseEntry; validEntry(entry); assert.equal(entry.intent.noteId.toUpperCase(), noteId.toUpperCase(), "Wrong ledger note"); return entry; }
   async function storage() {
     await safePaths();
-    await privateProbeDirectory(root);
-    await privateProbeDirectory(directory);
+    await privateTitleStateDirectory(root);
+    await privateTitleStateDirectory(directory);
     const wanted = await identity(), existing = await safeRead(pin);
     if (existing === undefined)
-      await createProbeJournal(pin, wanted);
+      await createPrivateTitleState(pin, wanted);
     else
       assert.equal(existing, wanted, "Title journal authority changed");
   }
@@ -299,11 +299,11 @@ export async function openDrawingTitleLedger(options: Options, overrides: Partia
   async function persist(noteId: string, entry: DrawingTitleLeaseEntry, authority: Awaited<ReturnType<Ports["lockAuthority"]>>) {
     validEntry(entry);
     await safePaths();
-    await privateProbeDirectory(root);
-    await privateProbeDirectory(directory);
+    await privateTitleStateDirectory(root);
+    await privateTitleStateDirectory(directory);
     const wanted = await identity(), existing = await safeRead(pin);
     if (existing === undefined)
-      await createProbeJournal(pin, wanted);
+      await createPrivateTitleState(pin, wanted);
     else
       assert.equal(existing, wanted, "Title journal authority changed");
     const destination = name(noteId), temporary = destination + ".next";

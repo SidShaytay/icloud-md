@@ -62,8 +62,7 @@ import { reconcileNoteFormat } from "../notes/formatReconcile.js";
 import { prepareTableAttachmentUpdate } from "../notes/tablePushEdit.js";
 import { historyRecordNames } from "../notes/trackedFile.js";
 import { recordVersion } from "../notes/versionHistory.js";
-import { createAttachmentTitleProbeIO } from "../notes/attachmentTitleProbe.js";
-import { prepareDrawingTitleRename } from "../notes/drawingTitleRename.js";
+import { createDrawingTitleIO } from "../notes/drawingTitleCloud.js";
 import { readAttachmentTitleIntent } from "../notes/attachmentTitleIntent.js";
 import { getAttachmentTitleLockAuthority } from "../notes/attachmentTitleLock.js";
 import { openDrawingTitleLedger, type DrawingTitleLeaseEntry } from "../notes/drawingTitleLedger.js";
@@ -111,10 +110,6 @@ export interface PushOptions {
   dryRun?: boolean;
   /** Routes any headless-recovery login status messages; defaults to staying silent (see `resolveFolderAccount`). */
   onLoginStatus?: (message: string) => void;
-  /** Research-harness opt-in, not exposed by the CLI while native title tests fail.
-   * Omitted by default. Evidence must be private
-   * and outside the vault. Requires an inherited exclusive normal-sync lock. */
-  attachmentTitleRenames?: { journalDirectory: string };
   /** Opt-in ongoing metadata-only Linux reconciliation, driven by later push
    * cycles. It does not claim that offline native devices have finished. */
   drawingTitleReconciliation?: DrawingTitleReconciliationConfig;
@@ -243,7 +238,7 @@ export interface BuildPushPlanResult {
  */
 export async function buildPushPlan(
   targetDir: string,
-  options: { onLoginStatus?: ((message: string) => void) | undefined; attachmentTitleRenames?: PushOptions["attachmentTitleRenames"]; drawingTitleReconciliation?: PushOptions["drawingTitleReconciliation"] } = {},
+  options: { onLoginStatus?: ((message: string) => void) | undefined; drawingTitleReconciliation?: PushOptions["drawingTitleReconciliation"] } = {},
 ): Promise<BuildPushPlanResult> {
   const state = await openVault(targetDir, migrationReporter(options.onLoginStatus));
   if (!state) {
@@ -961,7 +956,7 @@ export async function buildPushPlan(
     const tracked = Object.entries(state.notes).find(([id]) => id.toUpperCase() === lease.intent.noteId.toUpperCase());
     if (!tracked) continue;
     try {
-      const io = createAttachmentTitleProbeIO({ session, ckdatabasewsUrl, dsid, zone: noteZone(undefined) });
+      const io = createDrawingTitleIO({ session, ckdatabasewsUrl, dsid, zone: noteZone(undefined) });
       const plan = await prepareDrawingTitleReconciliation({ vault: targetDir, file: tracked[1].file, noteId: tracked[0], attachmentId: lease.intent.attachmentId,
         folderId: lease.intent.folderId, expectedNoteTag: tracked[1].recordChangeTag, io, ledger: titleLedger!, kind: "refresh" });
       entries.push({ kind: "update", file: tracked[1].file, resolution: "ready", ...(plan.localOnly ? { localOnly: true } : {}),
@@ -999,7 +994,7 @@ export async function buildPushPlan(
       try {
         const attachmentId = independent.attachments.length === 1 ? independent.attachments[0]!.attachmentIdentifier : undefined;
         if (!attachmentId) throw Error("One drawing required");
-        const io = createAttachmentTitleProbeIO({ session, ckdatabasewsUrl, dsid, zone: noteZone(undefined) });
+        const io = createDrawingTitleIO({ session, ckdatabasewsUrl, dsid, zone: noteZone(undefined) });
         const plan = await prepareDrawingTitleReconciliation({ vault: targetDir, file: pair.toFile, noteId: pair.recordName, attachmentId, folderId: pair.folderRecordName,
           expectedNoteTag: pair.entry.recordChangeTag, io, ledger: titleLedger, kind: "rename" });
         entries.push({ ...base, resolution: "ready", ...(plan.localOnly ? { localOnly: true } : {}),
@@ -1016,39 +1011,6 @@ export async function buildPushPlan(
           },
         });
       } catch { entries.push({ ...base, reason: "drawing-title reconciliation could not validate this unchanged filename intent; no title write was planned" }); }
-      continue;
-    }
-    if (options.attachmentTitleRenames && !pair.relocated && pair.newTitle !== undefined &&
-        independent.status === "ok" && independent.titleInMetadata &&
-        (independent.title !== pair.newTitle || record.recordChangeTag !== pair.entry.recordChangeTag)) {
-      try {
-        const attachmentId = independent.attachments.length === 1 ? independent.attachments[0]!.attachmentIdentifier : undefined;
-        if (!attachmentId) throw Error("Exactly one drawing is required");
-        const io = createAttachmentTitleProbeIO({ session, ckdatabasewsUrl, dsid, zone: noteZone(undefined) });
-        const baseline = await io.lookup([pair.recordName, attachmentId]);
-        const plan = await prepareDrawingTitleRename({ vault: targetDir, file: pair.toFile, noteId: pair.recordName,
-          attachmentId, folderId: pair.folderRecordName, journalDirectory: options.attachmentTitleRenames.journalDirectory,
-          baseline, expectedNoteTag: pair.entry.recordChangeTag, io });
-        entries.push({ ...base, resolution: "ready",
-          remark: "experimental drawing retitle; preserves visible content and assets, adds one deleted CRDT character",
-          execute: async () => {
-            const outcome = await plan.execute();
-            if (outcome.status === "ambiguous") return { succeeded: false, message: `${pair.toFile}: drawing retitle outcome is uncertain; journal retained and automatic retry blocked` };
-            const current = outcome.note;
-            await recordVersion(targetDir, { recordName: pair.recordName, recordType: "Note", field: "TextDataEncrypted",
-              recordChangeTag: current.recordChangeTag!, valueBase64: current.fields.TextDataEncrypted!.value as string });
-            // A cloud completion is not native verification. Only settle the
-            // unchanged local intent after exact readback; no move/body echo.
-            await plan.verifyLocalIntent();
-            state.notes[pair.recordName] = { ...pair.entry, file: pair.toFile, frontmatterTitle: pair.recordedTitle,
-              folderRecordName: pair.folderRecordName, recordChangeTag: current.recordChangeTag!, modificationDate: modificationDateOf(current) };
-            await applyNoteFileTimes(path.join(targetDir, pair.toFile), current);
-            return { succeeded: true, message: `Retitled ${pair.entry.file} -> ${pair.toFile} (native display unverified)` };
-          },
-        });
-      } catch (error) {
-        entries.push({ ...base, reason: `guarded drawing retitle refused: ${error instanceof Error ? error.message : "unsupported state"}` });
-      }
       continue;
     }
     if ((record.recordChangeTag ?? "") !== pair.entry.recordChangeTag) {
@@ -1639,7 +1601,7 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
 
 async function runPushUnlocked(targetDir: string, options: PushOptions): Promise<PushResult> {
   const dryRun = options.dryRun === true;
-  const { state, entries, notices } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus, attachmentTitleRenames: options.attachmentTitleRenames, drawingTitleReconciliation: options.drawingTitleReconciliation });
+  const { state, entries, notices } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus, drawingTitleReconciliation: options.drawingTitleReconciliation });
   const unchanged = countUnchangedNotes(entries, Object.keys(state.notes).length);
 
   if (entries.length === 0) {

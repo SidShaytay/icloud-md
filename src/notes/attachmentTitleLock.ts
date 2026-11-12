@@ -3,10 +3,8 @@ import { fstatSync } from "node:fs";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 
-/** Linux-only live-test exclusion. The wrapper passes the descriptor that it
- * actually locked, not a boolean claiming that another process holds a lock.
- * Its path must be the normal sync writer's lock; keep that writer's timer
- * paused during an experiment so systemd cannot remove/recreate its directory. */
+/** Require the actual exclusive Linux sync-writer lock inherited from its wrapper.
+ * The descriptor must reference the declared file and hold a kernel flock. */
 export async function getAttachmentTitleLockAuthority(): Promise<{ path: string; dev: string; ino: string }> {
   const lockPath = process.env.ICLOUD_MD_PROBE_LOCK_PATH;
   const descriptor = process.env.ICLOUD_MD_PROBE_LOCK_FD;
@@ -22,8 +20,4 @@ export async function getAttachmentTitleLockAuthority(): Promise<{ path: string;
   assert.match(information, /^lock:\s+\d+:\s+FLOCK\s+ADVISORY\s+WRITE\s+-?\d+\s+/m,
     "The inherited descriptor must hold an exclusive flock");
   return { path: await realpath(lockPath), dev: inherited.dev.toString(), ino: inherited.ino.toString() };
-}
-
-export async function assertAttachmentTitleLockHeld(): Promise<void> {
-  await getAttachmentTitleLockAuthority();
 }

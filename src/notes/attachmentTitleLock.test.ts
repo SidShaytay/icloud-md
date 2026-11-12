@@ -8,7 +8,7 @@ import { test } from "node:test";
 
 const execute = promisify(execFile);
 const moduleUrl = new URL("./attachmentTitleLock.ts", import.meta.url).href;
-const verify = `const { assertAttachmentTitleLockHeld, getAttachmentTitleLockAuthority } = await import(${JSON.stringify(moduleUrl)}); await assertAttachmentTitleLockHeld(); const authority = await getAttachmentTitleLockAuthority(); console.log(JSON.stringify(authority));`;
+const verify = `const { getAttachmentTitleLockAuthority } = await import(${JSON.stringify(moduleUrl)}); const authority = await getAttachmentTitleLockAuthority(); console.log(JSON.stringify(authority));`;
 
 async function fixture(run: (directory: string) => Promise<void>) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "title-probe-lock-"));

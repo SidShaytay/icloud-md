@@ -56,28 +56,3 @@ test("an already-cancelled update sends no HTTP request", async () => {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }
 });
-
-test("an explicit atomic batch preserves operation order and conditional versions", async () => {
-  const originalFetch = globalThis.fetch;
-  const updates = [update, { recordName: "fixture-drawing", recordType: "Attachment", recordChangeTag: "drawing-original", parentRecordName: "fixture-note", fields: { UserTitle: { value: "dGl0bGU=" } } }];
-  let requests = 0;
-  globalThis.fetch = async (input, init) => {
-    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-    assert.equal(url.origin, "https://cloudkit.invalid");
-    assert.equal(url.pathname, "/database/1/com.apple.notes/production/private/records/modify");
-    requests++;
-    const body = JSON.parse(init!.body as string);
-    assert.equal(body.atomic, true);
-    assert.deepEqual(body.operations.map((operation: { operationType: string; record: Record<string, unknown> }) => ({ kind: operation.operationType, name: operation.record.recordName, tag: operation.record.recordChangeTag })), [
-      { kind: "update", name: "fixture-note", tag: "original" },
-      { kind: "update", name: "fixture-drawing", tag: "drawing-original" },
-    ]);
-    return Response.json({ records: updates.map(record => ({ ...record, fields: {}, recordChangeTag: "next" })) });
-  };
-  try {
-    const results = await updateRecords(session, "https://cloudkit.invalid", "offline", "private", { zoneName: "Notes" }, updates, { atomic: true, redirect: "error", signal: AbortSignal.timeout(1_000) });
-    assert.equal(results.length, 2);
-    assert.ok(results.every(result => result.ok));
-    assert.equal(requests, 1);
-  } finally { globalThis.fetch = originalFetch; }
-});

@@ -1,15 +1,10 @@
-/** Read-only, bounded capture for standalone drawing-title experiments.
- * Raw records contain signed URLs; persist them only in private evidence. */
+/** Read-only, bounded preservation checks for drawing-title metadata writes. */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, open } from "node:fs/promises";
-import path from "node:path";
 import { gunzipSync, inflateSync } from "node:zlib";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
-import { isEnoent } from "../fsUtil.js";
 import { classifyNoteRecord, storesTextAsAsset } from "./decodeNoteRecord.js";
 import { isNoteId } from "./noteIdFrontmatter.js";
-import { createProbeJournal, privateProbeDirectory } from "./attachmentTitleProbeJournal.js";
 
 export interface DrawingCaptureScope { noteId: string; attachmentId: string; folderId: string; }
 export interface DrawingCapture {
@@ -132,51 +127,23 @@ async function download(asset: Asset, request: typeof fetch): Promise<Buffer> {
     throw Error("Asset download failed or size mismatch");
   }
 }
-async function writeAsset(file: string, bytes: Buffer): Promise<void> {
-  const handle = await open(file, "wx", 0o600);
-  try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
-}
-async function rejectSymlinkAncestors(directory: string): Promise<void> {
-  let current = path.parse(directory).root;
-  for (const component of path.relative(current, path.resolve(directory)).split(path.sep)) {
-    current = path.join(current, component);
-    try {
-      const stat = await lstat(current);
-      assert.ok(stat.isDirectory() && !stat.isSymbolicLink(), "Unsafe or symlink evidence ancestor");
-    } catch (error) { if (isEnoent(error)) return; throw error; }
-  }
-}
-
 /** Brackets every asset read with full record snapshots and versions. The caller
- * supplies a private-zone lookup; this function never writes to CloudKit. A new
- * private directory is required when persisting; failed captures stay incomplete. */
-export async function captureDrawingSnapshot(scope: DrawingCaptureScope, lookup: (ids: string[]) => Promise<CloudKitRecord[]>, options: { directory?: string; fetch?: typeof fetch } = {}): Promise<DrawingCapture> {
+ * supplies a private-zone lookup; this function writes neither cloud nor disk. */
+export async function captureDrawingSnapshot(scope: DrawingCaptureScope, lookup: (ids: string[]) => Promise<CloudKitRecord[]>, options: { fetch?: typeof fetch } = {}): Promise<DrawingCapture> {
   const identity = structuredClone(scope), request = options.fetch ?? fetch;
   assert.ok([identity.noteId, identity.attachmentId, identity.folderId].every(isNoteId), "Invalid drawing scope");
-  assert.ok(options.directory === undefined || path.isAbsolute(options.directory), "Evidence directory must be absolute");
-  const directory = options.directory === undefined ? undefined : path.resolve(options.directory);
   const read = async () => {
     try { return structuredClone(await lookup([identity.noteId, identity.attachmentId])); }
     catch { throw Error("Drawing record lookup failed"); }
   };
   const before = checkRecords(await read(), identity), assets = inventory(before.records);
-  if (directory !== undefined) {
-    await rejectSymlinkAncestors(directory);
-    await privateProbeDirectory(path.dirname(directory));
-    try { await mkdir(directory, { mode: 0o700 }); } catch { throw Error("Evidence directory exists or cannot be created; never overwrite captures"); }
-    await privateProbeDirectory(directory);
-    await rejectSymlinkAncestors(directory);
-    await createProbeJournal(path.join(directory, "records.json"), JSON.stringify(before.records));
-  }
   const captured: DrawingCapture = { records: before.records, documentSha256: sha(before.document), assets: [] };
-  for (const [index, asset] of assets.entries()) {
+  for (const asset of assets) {
     const bytes = await download(asset, request);
-    if (directory !== undefined) await writeAsset(path.join(directory, `asset-${index}.bin`), bytes);
     captured.assets.push({ field: asset.field, size: bytes.length, sha256: sha(bytes), contentIdentityHash: sha(JSON.stringify([asset.value.fileChecksum, asset.size])), referenceIdentityHash: sha(JSON.stringify([asset.value.referenceChecksum, asset.value.wrappingKey])) });
   }
   const after = checkRecords(await read(), identity);
   inventory(after.records);
   assert.ok(snapshot(before.records) === snapshot(after.records), "Drawing records changed during capture");
-  if (directory !== undefined) await createProbeJournal(path.join(directory, "complete.json"), JSON.stringify(captured));
   return captured;
 }

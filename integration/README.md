@@ -124,136 +124,29 @@ To run only this block:
 npm run build && ICLOUD_MD_ITEST=1 npx tsx --test --test-name-pattern="carriage-return" integration/live.test.ts
 ```
 
-## Independent attachment titles
+## Drawing-title reconciliation verification
 
-The focused attachment-title test plants a captured Apple table, keeps its
-entire document behind an object-only first line, and sets an independent
-display title. It verifies the pull filename and that both local renames and
-`apple-note-title` requests are refused without writing the note. The compressed
-note and table payloads must remain byte-identical, and Apple's web client must
-still render the original table. This covers reading an independent title and
-refusing unsupported retitles; it does not establish native scan/drawing edits.
+The opt-in [ongoing Linux workflow](../docs/drawing-title-reconciliation.md)
+changes title metadata only. Offline SDK tests assert the exact initial field
+sets and the later Note-title-only refresh, conditional record versions, durable
+uncertainty, conflict cancellation, writer exclusion and local bookkeeping.
+Preservation tests compare compressed document bytes and every drawing/preview
+asset, and refuse unknown assets or changed record/reference fingerprints.
 
-Native iPhone testing on 2026-11-05 showed why that distinction matters:
-CloudKit title updates could change the inside-note label without updating the
-note list, and an experimental edit-stamp workaround produced a duplicated
-drawing on the device despite passing local round-trip checks. That workaround
-is not part of the CLI. Keep attachment retitles refused until native-client
-behavior is understood and verified independently.
+The source implementation passed two successive ordinary Linux filename cycles
+with Mac Notes closed for each initial write. The first native fetch retained
+the previous list name; a later independently scheduled Linux title refresh
+corrected it. Native readback, reopening and a further normal cycle retained the
+final title. On 2026-11-08, the owner confirmed that final title on iPhone after
+reopening Notes, with one intact drawing and no added heading. Document, assets,
+references and identity were preserved; paired measurements for the second
+refresh also preserved local Markdown/base bytes, timestamps and inode.
 
-It runs with the full suite, or alone:
-
-```bash
-npm run build
-ICLOUD_MD_ITEST=1 npx tsx --test integration/attachmentTitles.live.ts
-```
-
-The experimental `attachmentTitleProbe.ts` helper isolates two CloudKit-only
-metadata phases: A changes the drawing's `UserTitle`; a separate invocation of B
-changes the containing note's title and modification date. Both use Linux/cloud
-state only. Neither calls, waits for, or accepts acknowledgements from a Mac.
-Preview is offline by default; applying a phase requires an explicit option and
-a private operation journal. Uncertain writes are never automatically replayed.
-
-The alternative terminal phase `BA` sends one explicit atomic batch containing
-the note's title/date followed by the drawing's `UserTitle` reassertion, using
-the [CloudKit records/modify request contract](https://developer.apple.com/library/archive/documentation/DataManagement/Conceptual/CloudKitWebServicesReference/ModifyRecords.html).
-`B` and `BA` are mutually exclusive: a shared durable terminal claim prevents
-using one as a retry of the other. Server-side atomicity and operation order do
-not establish native import order. The separate A/B trial passed with a connected
-Mac but left its list title stale when Notes was closed during the writes and
-reopened afterward. The BA trial also imported both latest versions while leaving
-the list title one rename behind; neither metadata-only sequence is a supported fix.
-
-The alternative `BD` phase tests a content-neutral causal revision. It computes
-the new document internally by inserting then deleting only a fresh trailing
-character before any upload. It requires identical visible text, complete
-formatting spans, original atom/style metadata and original replica counters,
-with graph contraction recovering the old structure. Only the computed payload
-is allowed; an arbitrary document blob cannot be supplied. It does not restamp
-the drawing's original formatting. **Serialized document bytes change**, while
-drawing/preview bytes and references must remain identical. `B`, `BA` and `BD`
-share a terminal claim and cannot be used to retry each other. Native rendering
-and the preservation of an unseen client-local newline still require external
-verification; this diagnostic is not a supported rename fix.
-
-The first BD trial updated the native title but duplicated the drawing because
-the document codec confused timestamp-row indexes with sorted UUID ranks. Both
-character and style references now translate through sorted UUID rank at the wire
-boundary, with independent wire-identity regressions. The accidental atom was removed by a verified forward causal repair; correcting
-the codec alone does not
-delete copies already merged by a client. Do not replay its journal or restore an
-older raw document. The corrected BD trial preserved
-visible content and formatting but still left the native title one rename behind after closed-client
-catch-up; it is rejected as an end-to-end rename fix.
-
-The `BR` alternative tests a physical character replacement. It uses the ordinary
-editor to tombstone the old drawing character and generate a fresh live character
-referencing the **same attachment ID and UTI**, with identical serialized formatting.
-Only the final one-drawing document is uploaded. The fresh character precedes the
-old tombstone, retaining unseen native descendants such as a local trailing newline.
-Character coordinates, the old character's style timestamp and causal document bytes
-change intentionally; asset bytes, references and note identity must not change.
-All four terminal alternatives share a durable claim. The closed-client BR trial
-preserved the drawing, formatting, unrelated history and local newline, but the
-native title still stayed one rename behind. It is rejected as a rename fix.
-
-A later one-shot Linux reassertion of **only** the already-current Note title
-advanced the cloud version and, after a subsequent native fetch, corrected the
-name. The modification date, compressed document and all five assets were unchanged.
-This supports investigating ongoing Linux reconciliation; it does not prove a
-finite completed rename will work for a device that remains offline until afterward.
-The failed causal-revision workflows remain unexposed by the CLI.
-
-The metadata-only ongoing mode is implemented in `drawingTitleReconciliation.ts`
-and its bounded `drawingTitleLedger.ts`, with matching options on ordinary `status`
-and `push`. Initial writes are A/B metadata only; due refreshes contain only
-`Note.TitleEncrypted`. Source and SDK tests cover locking, no early dispatch,
-uncertain outcomes, changed intent, full protected fingerprints and local
-bookkeeping. Native acceptance checks must run two ordinary filename cycles with
-the device closed for the initial writes, then let a later independently scheduled
-Linux push refresh the title. The writer must not read native verification output.
-See the [operating guide](../docs/drawing-title-reconciliation.md).
-
-Two successive ordinary Linux filename cycles passed Mac verification with Notes
-closed during each initial write. Each first native fetch retained the previous
-list name; a later scheduled Linux title-only refresh corrected it. Reopening
-Notes and another normal sync retained the second name. Cloud and native document
-bytes, all five assets, attachment references and note identity stayed unchanged.
-Paired measurements for the second refresh also preserved local Markdown/base
-bytes, mtime and inode. On 2026-11-08, the owner confirmed the final iPhone
-check: the second title remained after reopening Notes, with exactly one intact
-drawing and no added text heading. The iPhone check covers the final title; the
-two intermediate rename cycles were verified on the Mac. Native confirmation is
-recorded separately from cloud acknowledgements.
-
-The checked experimental caller is `attachmentTitleRunner.ts`, launched through
-`integration/runAttachmentTitleProbe` on Linux. It verifies the unchanged local
-filename request, account/private-folder scope, exact expected compressed document
-(including the explicitly planned revision for BD or BR), and all drawing/preview bytes.
-It captures private evidence before and after a
-write. Its approved preview digest binds those inputs, executable source,
-deadline, journal path and the actual held sync-lock descriptor. A different
-request, stale plan, changed local file or uncertain earlier phase stops it.
-
-Read the invocation flags without connecting to an account:
-
-```bash
-node --import tsx integration/attachmentTitleRunnerCli.ts --help
-```
-
-For a separately approved live trial, pause normal automatic sync, wait for its
-current run to finish, and set `ICLOUD_MD_PROBE_LOCK_PATH` to that writer's exact
-lock file before invoking the wrapper. Keep automatic sync paused throughout:
-systemd can remove a runtime lock directory when its service exits. Preview is
-the default and performs only cloud reads; applying requires the matching
-`--expected-plan` digest and `--apply`. Keep one fixed private journal per
-rename; never substitute a fresh journal to replay an uncertain operation.
-
-This is test tooling, not a supported rename command. Native list refresh,
-including after an offline device reconnects, remains unproven. Results explicitly
-say native verification is outstanding, and ordinary `push` continues to refuse
-these renames. Native devices may only observe the independent Linux write path.
+These native observations apply to the verified source branch, recorded in
+[issue #1](https://github.com/SidShaytay/icloud-md/issues/1). Extraction must pass
+its own retained offline suite; changed dispatch or state semantics require
+fresh native verification. The writer never reads native verification output,
+and future Linux sync and device fetch may still be needed for list convergence.
 
 ## Containment
 

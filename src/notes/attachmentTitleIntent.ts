@@ -12,7 +12,7 @@ import { readNoteId, readNoteTitleKey } from "./noteIdFrontmatter.js";
 import { titleFromNoteFileName } from "./noteTitleParagraph.js";
 import { titleIsRepresentable } from "./titleFilename.js";
 import { indexUntrackedNoteIds } from "./untrackedFiles.js";
-import type { TitleProbeIO } from "./attachmentTitleProbe.js";
+import type { DrawingTitleIO } from "./drawingTitleCloud.js";
 const sameId = (a: string, b: string) => a.toUpperCase() === b.toUpperCase();
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable) : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, stable(item)])) : value;
@@ -62,7 +62,7 @@ export async function readAttachmentTitleIntent(options: { vault: string; file: 
   return { vault, file: options.file, previousFile: entry.file, targetTitle, noteId,
     fileSha256: sha(await readFile(current)), baseSha256: sha(base), stateSha256: sha(json({ account: state.account, entry, folders, definitions, titleMode: state.titleMode })), accountDsidSha256: sha(state.account.dsid), folders };
 }
-export async function readAttachmentTitleFolders(local: LocalIntent, io: TitleProbeIO) {
+export async function readAttachmentTitleFolders(local: LocalIntent, io: DrawingTitleIO) {
   const records = await io.lookup(local.folders.map(folder => folder.id));
   assert.ok(records.length === local.folders.length, "Missing cloud folder");
   for (const folder of local.folders) {

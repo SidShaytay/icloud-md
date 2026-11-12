@@ -7,7 +7,7 @@ import type { CloudKitRecord, RecordUpdate } from "../cloudkit/databaseClient.js
 import { captureDrawingSnapshot, inspectDrawingRecords, type DrawingCapture } from "./attachmentTitleCapture.js";
 import { readAttachmentTitleFolders, readAttachmentTitleIntent, type LocalIntent } from "./attachmentTitleIntent.js";
 import { getAttachmentTitleLockAuthority } from "./attachmentTitleLock.js";
-import type { TitleProbeIO } from "./attachmentTitleProbe.js";
+import type { DrawingTitleIO } from "./drawingTitleCloud.js";
 import { openDrawingTitleLedger, type DrawingTitleLeaseIntent, type DrawingTitleLeaseObservation, type DrawingTitleLeaseEntry } from "./drawingTitleLedger.js";
 
 export interface DrawingTitleReconciliationConfig { journalDirectory: string; folderIds?: string[]; noteIds?: string[]; }
@@ -15,7 +15,7 @@ export type DrawingTitleLedger = Awaited<ReturnType<typeof openDrawingTitleLedge
 export interface DrawingReconciliationPorts { capture: typeof captureDrawingSnapshot; lockAuthority: typeof getAttachmentTitleLockAuthority; now(): number; }
 export interface DrawingReconciliationRequest {
   vault: string; file: string; noteId: string; attachmentId: string; folderId: string;
-  expectedNoteTag: string; io: TitleProbeIO; ledger: DrawingTitleLedger; kind: "rename" | "refresh";
+  expectedNoteTag: string; io: DrawingTitleIO; ledger: DrawingTitleLedger; kind: "rename" | "refresh";
 }
 export class DrawingTitleReconciliationUnavailable extends Error {}
 class DrawingTitleReconciliationConflict extends Error {}
