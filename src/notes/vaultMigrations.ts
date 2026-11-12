@@ -123,25 +123,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-/** Replay existing records once so unchanged attachment notes acquire readable
- * filenames. Pull performs only filename/envelope adoption at the same tag;
- * native note content is never rewritten by this migration. In-body vaults
- * deliberately retain their existing stable names and incremental cursors. */
-const refreshIndependentTitleFilenames: VaultMigration = {
-  from: 3,
-  to: 4,
-  describe: "scheduling a filename refresh for independent attachment titles",
-  run: async ({ state }) => {
-    if (state.titleMode !== "filename") return state;
-    const next = { ...state };
-    delete next.syncToken;
-    delete next.sharedZoneSyncTokens;
-    return next;
-  },
-};
-
 /** The migration chain, ordered by `from`. */
-export const VAULT_MIGRATIONS: readonly VaultMigration[] = [recordTitleModeAndIds, refreshIndependentTitleFilenames];
+export const VAULT_MIGRATIONS: readonly VaultMigration[] = [recordTitleModeAndIds];
 
 /** A chain and the version it climbs to. Separated from the module-level
  * constants purely so the runner can be exercised against synthetic chains -

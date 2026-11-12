@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
-import { buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
+import { buildNoteTitleMetadataFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
 import { buildInitialNoteDocument, encodeNoteDocument } from "../notes/noteDocument.js";
 import { compressNoteDocument } from "../notes/noteText.js";
 import { prepareRetitle, requestedRetitle, restoreStrippedTitle } from "./push.js";
@@ -26,16 +26,15 @@ function scanRecord(): CloudKitRecord {
   };
 }
 
-test("renaming an embed-first note is refused without changing its document or assets", () => {
+test("renaming an embed-first note changes only independent title metadata", () => {
   const record = scanRecord();
-  const before = structuredClone(record);
   const prepared = prepareRetitle(record, { entry, toFile: "Notes/New scan.md", newTitle: "New scan" }, replica, "filename");
-  assert.equal(prepared.ok, false);
-  if (prepared.ok) return;
-  assert.equal(prepared.resolution, "refused");
-  assert.match(prepared.reason, /native.*title|independent.*title/i);
-  assert.match(prepared.reason, /retitle the note in Notes/);
-  assert.deepEqual(record, before);
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) return;
+  assert.ok(prepared.retitle);
+  assert.equal(prepared.retitle.metadataTitle, "New scan");
+  assert.equal(prepared.retitle.payloadBase64, record.fields.TextDataEncrypted?.value);
+  assert.equal(prepared.retitle.plainText, "\uFFFC\nOriginal body");
 });
 
 test("a title-only metadata request on an embed-first note is not silently considered satisfied", () => {
@@ -52,31 +51,14 @@ test("an embed-first rename equal to its current display title needs no remote w
   if (prepared.ok) assert.equal(prepared.retitle, undefined);
 });
 
-for (const text of ["\uFFFC\nOriginal body", "changed body"]) {
-  test(`an independent-title request is refused with ${text === "changed body" ? "a changed" : "an unchanged"} body`, () => {
-    const classified = classifyNoteRecord(scanRecord(), { titleMode: "filename" });
-    assert.equal(classified.status, "ok");
-    if (classified.status !== "ok") return;
-    const summary = { conflicts: [] as string[], refused: [] as string[] };
-    assert.equal(restoreStrippedTitle(classified, { text, paragraphs: [] }, entry, summary, "New scan"), undefined);
-    assert.match(summary.refused[0] ?? "", /retitle it in Notes/);
-  });
-}
-
-for (const title of ["CON", "A drawing title that is too long to fit within the supported filename length limit"]) {
-  test(`unchanged frontmatter title ${JSON.stringify(title)} does not refuse a prose edit`, () => {
-    const record = scanRecord();
-    record.fields.TitleEncrypted = { value: Buffer.from(title).toString("base64"), type: "ENCRYPTED_BYTES" };
-    const classified = classifyNoteRecord(record, { titleMode: "filename" });
-    assert.equal(classified.status, "ok");
-    if (classified.status !== "ok") return;
-    assert.equal(classified.titleInMetadata, true);
-    const parsed = { text: "\uFFFC\nEdited prose", paragraphs: [] };
-    const summary = { conflicts: [] as string[], refused: [] as string[] };
-    assert.equal(restoreStrippedTitle(classified, parsed, entry, summary, title), parsed);
-    assert.deepEqual(summary.refused, []);
-  });
-}
+test("combined body and metadata-title edits are refused explicitly rather than dropping the title", () => {
+  const classified = classifyNoteRecord(scanRecord(), { titleMode: "filename" });
+  assert.equal(classified.status, "ok");
+  if (classified.status !== "ok") return;
+  const summary = { conflicts: [] as string[], refused: [] as string[] };
+  assert.equal(restoreStrippedTitle(classified, { text: "changed body", paragraphs: [] }, entry, summary, "New scan"), undefined);
+  assert.match(summary.refused[0] ?? "", /without a body edit first/);
+});
 
 test("a permitted prose edit after an opaque first-line embed preserves its independent title", () => {
   const fields = buildNoteUpdateFields(scanRecord(), "new-document-bytes", "\uFFFC\nEdited prose", 200);
@@ -88,10 +70,23 @@ test("adding a real text first line makes that text authoritative again", () => 
   assert.equal(Buffer.from(fields.TitleEncrypted?.value as string, "base64").toString(), "Real first line");
 });
 
-test("an independent-title request still respects the unsupported text-as-asset gate", () => {
+test("metadata retitle does not bypass the unsupported text-as-asset gate", () => {
   const record = scanRecord();
   record.fields.TextDataAsset = { value: { fileChecksum: "separate-body" }, type: "ASSETID" };
   const prepared = prepareRetitle(record, { entry, toFile: "Notes/New scan.md", newTitle: "New scan" }, replica, "filename");
   assert.equal(prepared.ok, false);
   if (!prepared.ok) assert.match(prepared.reason, /separate file/);
+});
+
+test("metadata retitle preserves every other remote field, including attachment assets", () => {
+  const record = scanRecord();
+  const before = structuredClone(record);
+  const fields = buildNoteTitleMetadataFields(record, "New scan", 200);
+  assert.equal(Buffer.from(fields.TitleEncrypted?.value as string, "base64").toString(), "New scan");
+  assert.equal(fields.ModificationDate?.value, 200);
+  for (const [key, field] of Object.entries(record.fields)) {
+    if (key !== "TitleEncrypted" && key !== "ModificationDate") assert.deepEqual(fields[key]?.value, field.value, key);
+  }
+  assert.deepEqual(Object.keys(fields).sort(), Object.keys(record.fields).sort());
+  assert.deepEqual(record, before, "planning never mutates the live record");
 });

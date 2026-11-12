@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   CURRENT_LAYOUT_VERSION,
-  readCloneState,
   STATE_DIR_NAME,
   STATE_FILE_NAME,
   writeCloneState,
@@ -192,55 +191,6 @@ test("a gap in the migration chain fails loudly instead of half-migrating", () =
 
 // --- the real chain -------------------------------------------------------
 
-test("a filename-mode version-3 vault schedules one complete title refresh without touching notes", () =>
-  withTempDir(async (dir) => {
-    const before = {
-      layoutVersion: 3, titleMode: "filename", syncToken: "private-cursor",
-      sharedZoneSyncTokens: { owner: "shared-cursor" }, replicaId: "fixture-replica",
-      notes: { drawing: { file: "drawing.md", recordChangeTag: "t", modificationDate: 1 } },
-      extraState: { preserved: true },
-    };
-    await writeStateAtVersion(dir, before);
-    const content = "---\napple-note-id: drawing\n---\nLocal body";
-    await writeFile(path.join(dir, "drawing.md"), content);
-    await writeBaseCopy(dir, "drawing", "Synced body");
-
-    const state = await openVault(dir);
-    assert.equal(state?.syncToken, undefined);
-    assert.equal(state?.sharedZoneSyncTokens, undefined);
-    const { syncToken, sharedZoneSyncTokens, ...retained } = before;
-    const expected = { ...retained, layoutVersion: CURRENT_LAYOUT_VERSION };
-    assert.deepEqual(await readStateFile(dir), expected);
-    assert.equal(await readFile(path.join(dir, "drawing.md"), "utf-8"), content);
-    await openVault(dir);
-    assert.deepEqual(await readStateFile(dir), expected, "the refresh is scheduled only once");
-  }));
-
-test("an in-body version-3 vault keeps its cursors and filenames", () =>
-  withTempDir(async (dir) => {
-    await writeStateAtVersion(dir, {
-      layoutVersion: 3, titleMode: "in-body", syncToken: "private-cursor",
-      sharedZoneSyncTokens: { owner: "shared-cursor" }, notes: {},
-    });
-    const state = await openVault(dir);
-    assert.equal(state?.layoutVersion, CURRENT_LAYOUT_VERSION);
-    assert.equal(state?.syncToken, "private-cursor");
-    assert.deepEqual(state?.sharedZoneSyncTokens, { owner: "shared-cursor" });
-  }));
-
-test("non-migrating account readers report the actual version-3 layout without rewriting it", () =>
-  withTempDir(async (dir) => {
-    const before = {
-      layoutVersion: 3, titleMode: "filename", syncToken: "private-cursor", notes: {},
-      account: { appleId: "fixture@example.invalid", dsid: "fixture-account" },
-    };
-    await writeStateAtVersion(dir, before);
-    const state = await readCloneState(dir);
-    assert.equal(state?.layoutVersion, 3);
-    assert.deepEqual(state?.account, before.account);
-    assert.deepEqual(await readStateFile(dir), before);
-  }));
-
 test("a version-2 vault migrates forward on first contact, in place", () =>
   withTempDir(async (dir) => {
     await writeStateAtVersion(dir, {
@@ -257,7 +207,7 @@ test("a version-2 vault migrates forward on first contact, in place", () =>
     // needs rewriting to say so.
     assert.equal(state?.titleMode, "in-body");
     assert.equal(state?.notes["REC-1"]?.file, "Notes/A.md", "the vault's contents come through untouched");
-    assert.deepEqual(described, VAULT_MIGRATIONS.map((migration) => migration.describe));
+    assert.deepEqual(described, [VAULT_MIGRATIONS[0]!.describe]);
 
     // Committed to disk, not just to the returned object.
     assert.equal((await readStateFile(dir)).layoutVersion, CURRENT_LAYOUT_VERSION);

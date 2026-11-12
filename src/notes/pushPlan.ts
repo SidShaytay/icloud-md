@@ -34,8 +34,6 @@ export interface PlanEntry {
   kind: PlanEntryKind;
   file: string;
   resolution: PlanResolution;
-  /** Execution changes local tracking only; it sends no remote mutation. */
-  localOnly?: boolean;
   /** Required for "refused"/"conflict"; ignored otherwise. */
   reason?: string;
   /** kind "createFolder" only: `file` is a directory path rather than a
@@ -258,7 +256,6 @@ export type SerializedPlanEntry = Pick<
   | "kind"
   | "file"
   | "resolution"
-  | "localOnly"
   | "reason"
   | "previousFile"
   | "pendingRename"
@@ -273,7 +270,6 @@ export function serializePlanEntry(entry: PlanEntry): SerializedPlanEntry {
     kind,
     file,
     resolution,
-    localOnly,
     reason,
     previousFile,
     pendingRename,
@@ -284,7 +280,6 @@ export function serializePlanEntry(entry: PlanEntry): SerializedPlanEntry {
     kind,
     file,
     resolution,
-    ...(localOnly === true ? { localOnly: true } : {}),
     ...(reason !== undefined ? { reason } : {}),
     ...(previousFile !== undefined ? { previousFile } : {}),
     ...(pendingRename !== undefined ? { pendingRename } : {}),

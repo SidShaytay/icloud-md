@@ -243,7 +243,7 @@ export const STATE_FILE_NAME = "state.json";
  * migrated vault refuses it - so it is spent only when the on-disk shape
  * genuinely changes, never on additive metadata.
  */
-export const CURRENT_LAYOUT_VERSION = 4;
+export const CURRENT_LAYOUT_VERSION = 3;
 
 export async function writeCloneState(targetDir: string, state: CloneState): Promise<void> {
   const stamped: CloneState = {
@@ -331,9 +331,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     throw new CorruptStateFileError(`${filePath} does not look like a valid state file (missing "notes" object).`);
   }
 
-  // Layout 3 has the same fields: auth and diagnostics can read it without
-  // scheduling a title refresh. Note commands migrate through openVault.
-  if (value.layoutVersion !== CURRENT_LAYOUT_VERSION && value.layoutVersion !== 3) {
+  if (value.layoutVersion !== CURRENT_LAYOUT_VERSION) {
     throw new UnsupportedVaultLayoutError(path.dirname(path.dirname(filePath)));
   }
 
@@ -455,7 +453,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
   }
 
   return {
-    layoutVersion: value.layoutVersion,
+    layoutVersion: CURRENT_LAYOUT_VERSION,
     generator: typeof value.generator === "string" ? value.generator : undefined,
     titleMode: value.titleMode === "filename" ? "filename" : "in-body",
     account,

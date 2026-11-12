@@ -204,9 +204,8 @@ export async function runPull(
     });
   }
 
-  let privateReplayIncomplete = false;
-  const sources: Array<{ records: CloudKitRecord[]; sharedZoneOwner?: string | undefined; resynced: boolean; tokenRejected: boolean }> = [
-    { records, resynced: resyncedFromScratch || state.syncToken === undefined, tokenRejected: resyncedFromScratch },
+  const sources: Array<{ records: CloudKitRecord[]; sharedZoneOwner?: string | undefined; resynced: boolean }> = [
+    { records, resynced: resyncedFromScratch },
   ];
   const sharedZoneSyncTokens: Record<string, string> = {};
   const sharedZoneRecords: SharedZoneRecords[] = [];
@@ -217,11 +216,7 @@ export async function runPull(
     if (zone.zoneID.ownerRecordName) {
       sharedZoneRecords.push({ ownerRecordName: zone.zoneID.ownerRecordName, records: zone.records });
     }
-    sources.push({
-      records: zone.records, sharedZoneOwner: zone.zoneID.ownerRecordName,
-      resynced: zone.resyncedFromScratch || state.sharedZoneSyncTokens?.[zone.zoneID.ownerRecordName ?? ""] === undefined,
-      tokenRejected: zone.resyncedFromScratch,
-    });
+    sources.push({ records: zone.records, sharedZoneOwner: zone.zoneID.ownerRecordName, resynced: zone.resyncedFromScratch });
   }
   // A skipped zone yielded no new sync token - carry the stored one forward
   // so the zone resumes incrementally on a later pull instead of refetching
@@ -230,9 +225,6 @@ export async function runPull(
   // token).
   for (const skipped of skippedZones) {
     const owner = skipped.zoneID.ownerRecordName;
-    // Keep the skipped zone's carried folder/home layout too: omitting it
-    // would discard its display name and move files when the retry succeeds.
-    if (owner) sharedZoneRecords.push({ ownerRecordName: owner, records: [] });
     const carried = owner ? (state.sharedZoneSyncTokens ?? {})[owner] : undefined;
     if (owner && carried) {
       sharedZoneSyncTokens[owner] = carried;
@@ -268,11 +260,6 @@ export async function runPull(
 
         const existing = notes[record.recordName];
         const decoded = classifyNoteRecord(record, { titleMode });
-        // Missing text is a transient delivery gap. Keep a private full
-        // replay eligible for retry even when the same-tag skip below fires.
-        if (source.resynced && source.sharedZoneOwner === undefined && decoded.status === "unsyncable" && decoded.reason === "missing-body") {
-          privateReplayIncomplete = true;
-        }
 
         // A resynced zone re-delivers *every* record, changed or not. One
         // whose change tag still matches what this vault last synced hasn't
@@ -362,42 +349,6 @@ export async function runPull(
           unpublishableReason: decoded.unpublishableReason,
         };
         const renderedBody = decoded.embedSlots.length === 0 ? decoded.markdownText : undefined;
-
-        // Same-version title adoption only moves the file and, when needed,
-        // records an unrepresentable title. Never re-render its attachments
-        // or merge its body, and preserve a local frontmatter title choice.
-        if (source.resynced && titleMode === "filename" && decoded.titleInMetadata && existing !== undefined &&
-            atTrackedTag(record, existing) && !trackedEntryMatches(existing, derived, titleMode)) {
-          const local = await readLocalNote(targetDir, existing, record.recordName, titleMode);
-          // Missing or hand-renamed files represent local intent; adoption
-          // must not recreate them or consume a pending local rename.
-          if (local.status === "missing") continue;
-          const fileTitle = readNoteTitle(local.frontmatter);
-          const frontmatter = fileTitle !== existing.frontmatterTitle
-            ? local.frontmatter
-            : recordedTitle === undefined
-              ? clearNoteTitle(local.frontmatter)
-              : setNoteTitle(local.frontmatter, recordedTitle);
-          const adopted = await renameForRemoteTitle(targetDir, existing.file, decoded.titleLine, titleMode, {
-            usedFileNames, onDisk: true, defer: deferRenames,
-          });
-          if (frontmatter !== local.frontmatter) {
-            await writeFile(path.join(targetDir, adopted.file), joinFrontmatter(frontmatter, local.body), "utf-8");
-          }
-          notes[record.recordName] = {
-            ...existing, ...adopted, pendingRename: adopted.pendingRename,
-            folderRecordName: derived.folderRecordName, unpublishableReason: derived.unpublishableReason,
-            frontmatterTitle: recordedTitle,
-          };
-          summary.updated += 1;
-          summary.changes.push({
-            kind: "update", file: adopted.file,
-            ...(adopted.file === existing.file ? {} : { previousFile: existing.file }),
-            ...(adopted.pendingRename === undefined ? {} : { pendingRename: path.posix.join(noteDirOf(adopted.file), adopted.pendingRename) }),
-            ...remarksFor(titleRemarks, decoded.unpublishableReason),
-          });
-          continue;
-        }
 
         // This skip comes before the snapshot below, so a pushed version
         // whose re-delivery happens to be a resync never enters the history.
@@ -746,13 +697,13 @@ export async function runPull(
 
   progress?.onProcessComplete?.();
 
-  // A token-free replay (including a migration or rejected stored cursor)
-  // delivered a complete listing rather than a
+  // A zone that was resynced from scratch (its stored sync token rejected -
+  // see `fetchZoneNoteRecords`) delivered a complete listing rather than a
   // delta, and a full listing carries no tombstones: whatever was deleted
   // remotely while the token was unusable simply isn't in it. Reconcile by
   // absence, zone by zone, so those deletions aren't silently missed forever.
   for (const source of sources) {
-    if (!source.resynced || (source.sharedZoneOwner === undefined && privateReplayIncomplete)) {
+    if (!source.resynced) {
       continue;
     }
     const removed = await reconcileNotesAfterResync(
@@ -765,7 +716,6 @@ export async function runPull(
       summary,
       titleMode,
     );
-    if (!source.tokenRejected) continue;
     const zoneLabel = source.sharedZoneOwner === undefined ? "this vault's own notes" : `the notes shared by ${source.sharedZoneOwner}`;
     summary.notices.push({
       level: "warn",
@@ -797,7 +747,7 @@ export async function runPull(
 
   await writeCloneState(targetDir, {
     account: state.account,
-    syncToken: privateReplayIncomplete ? state.syncToken : syncToken,
+    syncToken,
     sharedZoneSyncTokens,
     // Carried through untouched - omitting this here used to silently wipe
     // the vault's replica identity on every pull, forcing the next push to
